@@ -84,7 +84,11 @@ int main(void)
         playos_enter_recovery(s, "data partition not found");
     } else {
         playos_boot_stage_write(BOOT_STAGE_DATA_MOUNTED);
-        playos_data_create_dirs();
+        if (playos_data_create_dirs() != 0) {
+            playos_log_write(s, "init",
+                    "ERROR: /data provisioning failed — halting");
+            playos_enter_recovery(s, "data provisioning failed");
+        }
     }
 
     /* Stage 3: Set up IPC sockets */
