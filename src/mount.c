@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <dirent.h>
+#include <limits.h>
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
@@ -550,10 +552,12 @@ int playos_mount_data(struct playos_init_state *state)
 /*
  * Validate (or create) the /data storage version marker.
  *
- * First boot is detected by the marker's absence: the full directory set is
- * already provisioned by playos_data_create_dirs() before this runs, so on a
- * first boot we simply stamp the current version. On every later mount we
- * read the marker and warn (but do not halt) on a version mismatch.
+ * Returns:
+ *   1  — first boot: the marker was absent and has now been created
+ *   0  — marker exists and matches the current schema version
+ *  -1  — marker could not be read or created
+ *
+ * On a version mismatch we warn but still return 0 so boot continues.
  */
 static int playos_storage_version_validate(void)
 {
@@ -574,7 +578,7 @@ static int playos_storage_version_validate(void)
             dprintf(STDERR_FILENO,
                     "playos-init: storage version marker created (%s)\n",
                     PLAYOS_STORAGE_VERSION_CURRENT);
-            return 0;
+            return 1;
         }
 
         dprintf(STDERR_FILENO,
@@ -615,6 +619,135 @@ static int playos_storage_version_validate(void)
     return 0;
 }
 
+/* ── Shipped game seeding (Sprint 6) ─────────────────────────────── */
+
+/*
+ * Recursively copy a single regular file, preserving the executable bit.
+ */
+static int playos_copy_file(const char *src, const char *dst, mode_t mode)
+{
+    int in = open(src, O_RDONLY);
+    if (in < 0)
+        return -1;
+
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+
+    char buf[4096];
+    ssize_t n;
+    int rc = 0;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                if (errno == EINTR)
+                    continue;
+                rc = -1;
+                break;
+            }
+            off += w;
+        }
+        if (rc != 0)
+            break;
+    }
+    if (n < 0)
+        rc = -1;
+
+    close(out);
+    close(in);
+    return rc;
+}
+
+/*
+ * Recursively copy a directory tree from the read-only rootfs into the
+ * writable /data partition. Entries keep the source mode; only regular
+ * files and directories are handled (the shipped games contain only these).
+ */
+static int playos_copy_tree(const char *src, const char *dst)
+{
+    struct stat st;
+    if (stat(src, &st) != 0)
+        return -1;
+
+    if (S_ISREG(st.st_mode))
+        return playos_copy_file(src, dst, st.st_mode & 0777);
+
+    if (!S_ISDIR(st.st_mode))
+        return 0;
+
+    if (mkdir(dst, st.st_mode & 0777) != 0 && errno != EEXIST)
+        return -1;
+
+    DIR *d = opendir(src);
+    if (!d)
+        return -1;
+
+    int rc = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        char src_path[PATH_MAX];
+        char dst_path[PATH_MAX];
+        snprintf(src_path, sizeof(src_path), "%s/%s", src, de->d_name);
+        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst, de->d_name);
+
+        if (playos_copy_tree(src_path, dst_path) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    closedir(d);
+    return rc;
+}
+
+/*
+ * Seed the shipped sample games from the read-only rootfs into the data
+ * partition on first boot. The library scans /data/games, so the titles
+ * appear only after this copy. A missing seed source is non-fatal: an
+ * image built without the package simply boots with an empty library.
+ */
+static void playos_seed_shipped_games(void)
+{
+    const char *seed_root = "/usr/share/playos/games";
+    DIR *d = opendir(seed_root);
+    if (!d) {
+        dprintf(STDERR_FILENO,
+                "playos-init: no shipped games at %s to seed\n", seed_root);
+        return;
+    }
+
+    struct dirent *de;
+    int seeded = 0;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+
+        char src[PATH_MAX];
+        char dst[PATH_MAX];
+        snprintf(src, sizeof(src), "%s/%s", seed_root, de->d_name);
+        snprintf(dst, sizeof(dst), "/data/games/%s", de->d_name);
+
+        if (playos_copy_tree(src, dst) == 0) {
+            dprintf(STDERR_FILENO, "playos-init: seeded game %s\n",
+                    de->d_name);
+            seeded++;
+        } else {
+            dprintf(STDERR_FILENO, "playos-init: failed to seed game %s\n",
+                    de->d_name);
+        }
+    }
+    closedir(d);
+
+    if (seeded > 0)
+        sync();
+}
+
 int playos_data_create_dirs(void)
 {
     /* Final MVP /data layout — /data/log is the shipped singular spelling. */
@@ -642,13 +775,18 @@ int playos_data_create_dirs(void)
         }
     }
 
-    /* Validate the schema version on every mount; first boot stamps it. */
-    if (playos_storage_version_validate() != 0) {
+    /* Validate the schema version on every mount; a fresh marker (return 1)
+     * means first boot, so seed the shipped games into the new /data. */
+    int first_boot = playos_storage_version_validate();
+    if (first_boot < 0) {
         dprintf(STDERR_FILENO,
                 "playos-init: storage provisioning incomplete "
                 "(version marker unavailable)\n");
         return -1;
     }
+
+    if (first_boot == 1)
+        playos_seed_shipped_games();
 
     return 0;
 }
