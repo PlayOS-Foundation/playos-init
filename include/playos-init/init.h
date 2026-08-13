@@ -91,7 +91,8 @@ struct playos_init_state {
     int compositor_sock_fd;
 
     /* Logging */
-    int  log_fd;
+    int  log_fd;              /* /run/playos/log/init.log (tmpfs, always)   */
+    int  log_fd_persistent;   /* /data/log/init.log (opened after /data)    */
     char log_ring[PLAYOS_LOG_RING_SIZE];
     int  log_write_pos;
     int  log_wrapped;
@@ -107,5 +108,9 @@ extern struct playos_init_state g_state;
 /* ── Initialization ──────────────────────────────────────────────── */
 
 void playos_init_state_init(struct playos_init_state *s);
+
+/* ── Logging ─────────────────────────────────────────────────────── */
+
+void playos_log_open_persistent(struct playos_init_state *s);
 
 #endif /* PLAYOS_INIT_H */

@@ -89,6 +89,52 @@ void playos_log_init(struct playos_init_state *s)
 
 /* ── Log write ───────────────────────────────────────────────────── */
 
+/*
+ * Flush the in-memory ring buffer to fd, oldest bytes first, so that
+ * early-boot lines (written before /data was mounted) survive into the
+ * persistent on-device log.
+ */
+static void ring_flush_to_fd(struct playos_init_state *s, int fd)
+{
+    if (s->log_wrapped) {
+        /* Wrapped: tail..end, then start..write_pos */
+        ssize_t w = write(fd, s->log_ring + s->log_write_pos,
+                          (size_t)(PLAYOS_LOG_RING_SIZE - s->log_write_pos));
+        (void)w;
+    }
+    if (s->log_write_pos > 0) {
+        ssize_t w = write(fd, s->log_ring, (size_t)s->log_write_pos);
+        (void)w;
+    }
+}
+
+/*
+ * Open the persistent on-device log on the data partition. Called once
+ * /data has been mounted and /data/log created. The RAM log in
+ * /run/playos/log/init.log remains the primary target; this is an
+ * additional sink so the boot trace survives power-off. Any early-boot
+ * lines already buffered are flushed first so they aren't lost.
+ */
+void playos_log_open_persistent(struct playos_init_state *s)
+{
+    if (s->log_fd_persistent >= 0)
+        return; /* already open */
+
+    int fd = open("/data/log/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        dprintf(STDERR_FILENO,
+                "playos-init: cannot open /data/log/init.log: %s "
+                "(logging to /run only)\n",
+                strerror(errno));
+        return;
+    }
+
+    s->log_fd_persistent = fd;
+
+    /* Preserve the early-boot trace already held in the ring buffer. */
+    ring_flush_to_fd(s, fd);
+}
+
 void playos_log_write(struct playos_init_state *s, const char *tag,
                       const char *fmt, ...)
 {
@@ -120,6 +166,12 @@ void playos_log_write(struct playos_init_state *s, const char *tag,
     if (s->log_fd >= 0) {
         /* Ignore errors — logging must not crash PID 1 */
         ssize_t written = write(s->log_fd, line, strlen(line));
+        (void)written;
+    }
+
+    /* Also persist to /data/log/init.log when available (best-effort) */
+    if (s->log_fd_persistent >= 0) {
+        ssize_t written = write(s->log_fd_persistent, line, strlen(line));
         (void)written;
     }
 
@@ -155,6 +207,9 @@ void playos_log_fatal(struct playos_init_state *s, const char *tag,
     ring_append(s, line);
     if (s->log_fd >= 0) {
         write(s->log_fd, line, strlen(line));
+    }
+    if (s->log_fd_persistent >= 0) {
+        write(s->log_fd_persistent, line, strlen(line));
     }
     dprintf(STDERR_FILENO, "%s", line);
 

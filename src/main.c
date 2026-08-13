@@ -89,6 +89,9 @@ int main(void)
                     "ERROR: /data provisioning failed — halting");
             playos_enter_recovery(s, "data provisioning failed");
         }
+        /* /data/log now exists — persist the boot trace to the USB. */
+        playos_log_open_persistent(s);
+        playos_log_write(s, "init", "persistent log opened on /data/log/init.log");
     }
 
     /* Stage 3: Set up IPC sockets */
