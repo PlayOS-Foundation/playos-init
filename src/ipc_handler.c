@@ -20,6 +20,8 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <poll.h>
+#include <dirent.h>
+#include <limits.h>
 
 #include "playos-init/init.h"
 
@@ -58,6 +60,91 @@ static int build_status_json(char *buf, size_t size,
         s->game_id ? s->game_id : "",
         (int)s->boot_stage,
         s->recovery_mode);
+}
+
+/*
+ * Parse a top-level JSON boolean field of the form "field":true.
+ * Returns 0 and stores the value in *out on success, or -1 if the
+ * field is absent/malformed. The caller treats -1 as false (defensive).
+ */
+static int json_get_bool(const char *json, const char *field, int *out)
+{
+    if (!json || !field || !out)
+        return -1;
+
+    char key[64];
+    int n = snprintf(key, sizeof(key), "\"%s\"", field);
+    if (n < 0 || (size_t)n >= sizeof(key))
+        return -1;
+
+    const char *p = strstr(json, key);
+    if (!p)
+        return -1;
+
+    p = strchr(p, ':');
+    if (!p)
+        return -1;
+    p++;
+
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+
+    if (strncmp(p, "true", 4) == 0) {
+        *out = 1;
+        return 0;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = 0;
+        return 0;
+    }
+
+    return -1;
+}
+
+/*
+ * Recursively delete a directory tree and recreate the top-level
+ * directory. Skips "." and "..". Returns 0 on success, -1 on error.
+ */
+static int rmtree(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir)
+        return -1;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) {
+            closedir(dir);
+            return -1;
+        }
+
+        struct stat st;
+        if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (rmtree(child) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            if (unlink(child) != 0 && errno != ENOENT) {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+    closedir(dir);
+
+    if (rmdir(path) != 0 && errno != ENOENT)
+        return -1;
+
+    if (mkdir(path, 0755) != 0 && errno != EEXIST)
+        return -1;
+
+    return 0;
 }
 
 /*
@@ -327,6 +414,106 @@ static int handle_message(struct playos_init_state *s, int client_fd,
     /* ── ShellReady (Sprint 5) ────────────────────────────────── */
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_SHELL_READY) == 0) {
         playos_log_write(s, "ipc", "shell ready notification received");
+        playos_ipc_message_free(&msg);
+        return 0;
+    }
+
+    /* ── FactoryReset (Sprint 6) ──────────────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_FACTORY_RESET) == 0) {
+        int erase_games = 0;
+        int erase_saves = 0;
+        int erase_cache = 0;
+        int erase_config = 0;
+        int erase_logs = 0;
+
+        /* Absent or malformed booleans default to false (defensive). */
+        (void)json_get_bool(msg.json_raw, "erase_games", &erase_games);
+        (void)json_get_bool(msg.json_raw, "erase_saves", &erase_saves);
+        (void)json_get_bool(msg.json_raw, "erase_cache", &erase_cache);
+        (void)json_get_bool(msg.json_raw, "erase_config", &erase_config);
+        (void)json_get_bool(msg.json_raw, "erase_logs", &erase_logs);
+
+        if (s->game_pid != 0) {
+            playos_log_write(s, "ipc", "FactoryReset rejected: game running");
+
+            char err_json[256];
+            int err_len = snprintf(err_json, sizeof(err_json),
+                "{\"v\":%d,\"type\":\"%s\",\"reason\":\"game_running\"}",
+                PLAYOS_IPC_PROTOCOL_VERSION,
+                PLAYOS_IPC_TYPE_FACTORY_RESET_ERROR);
+            struct playos_ipc_frame *err_frame =
+                malloc(sizeof(*err_frame) + (size_t)err_len);
+            if (err_frame) {
+                err_frame->magic = PLAYOS_IPC_MAGIC;
+                err_frame->length = (uint32_t)err_len;
+                memcpy(err_frame->body, err_json, (size_t)err_len);
+                (void)!write(client_fd, err_frame,
+                             sizeof(*err_frame) + (size_t)err_len);
+                free(err_frame);
+            }
+
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
+        /* Sprint 6 scope: erase_cache and erase_config only. */
+        if (erase_cache) {
+            playos_log_write(s, "ipc", "FactoryReset: erasing /data/cache");
+            if (rmtree("/data/cache") != 0) {
+                playos_log_write(s, "ipc",
+                                 "FactoryReset: failed to reset /data/cache");
+            }
+        }
+        if (erase_config) {
+            playos_log_write(s, "ipc", "FactoryReset: erasing /data/config");
+            if (rmtree("/data/config") != 0) {
+                playos_log_write(s, "ipc",
+                                 "FactoryReset: failed to reset /data/config");
+            }
+        }
+
+        /* erase_games/erase_saves/erase_logs are deferred to Sprint 10;
+         * report them explicitly rather than acting on them. */
+        char deferred_json[128] = "";
+        if (erase_games || erase_saves || erase_logs) {
+            char items[96] = "";
+            size_t off = 0;
+            if (erase_games)
+                off += (size_t)snprintf(items + off, sizeof(items) - off,
+                                        "%s\"games\"", off ? "," : "");
+            if (erase_saves)
+                off += (size_t)snprintf(items + off, sizeof(items) - off,
+                                        "%s\"saves\"", off ? "," : "");
+            if (erase_logs)
+                off += (size_t)snprintf(items + off, sizeof(items) - off,
+                                        "%s\"logs\"", off ? "," : "");
+            snprintf(deferred_json, sizeof(deferred_json),
+                     ",\"deferred\":[%s]", items);
+        }
+
+        char done_json[512];
+        int done_len = snprintf(done_json, sizeof(done_json),
+            "{\"v\":%d,\"type\":\"%s\"%s}",
+            PLAYOS_IPC_PROTOCOL_VERSION,
+            PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE,
+            deferred_json);
+        if (done_len < 0 || (size_t)done_len >= sizeof(done_json)) {
+            playos_ipc_message_free(&msg);
+            return -1;
+        }
+
+        struct playos_ipc_frame *done_frame =
+            malloc(sizeof(*done_frame) + (size_t)done_len);
+        if (done_frame) {
+            done_frame->magic = PLAYOS_IPC_MAGIC;
+            done_frame->length = (uint32_t)done_len;
+            memcpy(done_frame->body, done_json, (size_t)done_len);
+            (void)!write(client_fd, done_frame,
+                         sizeof(*done_frame) + (size_t)done_len);
+            free(done_frame);
+        }
+
+        playos_log_write(s, "ipc", "FactoryReset complete");
         playos_ipc_message_free(&msg);
         return 0;
     }

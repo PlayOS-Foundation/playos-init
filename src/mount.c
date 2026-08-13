@@ -62,6 +62,11 @@ void playos_log_write(struct playos_init_state *s, const char *tag,
                       const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
+/* ── Storage version marker (Sprint 6) ──────────────────────────── */
+
+#define PLAYOS_STORAGE_VERSION_MARKER "/data/.playos-storage-version"
+#define PLAYOS_STORAGE_VERSION_CURRENT "1"
+
 /* ── Mount virtual filesystems ───────────────────────────────────── */
 
 int playos_mount_virtual(void)
@@ -475,6 +480,31 @@ static void write_data_markers(const char *chosen_dev)
     fclose(parts);
 }
 
+/* Log every block device the kernel knows about so a failed data-partition
+ * discovery produces a diagnostic trail rather than a silent halt. */
+static void log_available_block_devices(void)
+{
+    FILE *parts = fopen("/proc/partitions", "r");
+    if (!parts) {
+        dprintf(STDERR_FILENO,
+                "playos-init: cannot read /proc/partitions for diagnostics\n");
+        return;
+    }
+
+    char line[256];
+    dprintf(STDERR_FILENO, "playos-init: available block devices:\n");
+
+    fgets(line, sizeof(line), parts); /* header */
+    fgets(line, sizeof(line), parts); /* blank  */
+    while (fgets(line, sizeof(line), parts)) {
+        char name[64] = {0};
+        if (sscanf(line, "%*d %*d %*d %63s", name) == 1)
+            dprintf(STDERR_FILENO, "  /dev/%s\n", name);
+    }
+
+    fclose(parts);
+}
+
 int playos_mount_data(struct playos_init_state *state)
 {
     (void)state;
@@ -484,7 +514,9 @@ int playos_mount_data(struct playos_init_state *state)
     if (find_data_partition(device_path, sizeof(device_path)) != 0) {
         dprintf(STDERR_FILENO,
                 "playos-init: data partition not found "
-                "(label=playos-data, cmdline, GPT GUID)\n");
+                "(label=playos-data, block-device scan, /proc/partitions, "
+                "GPT GUID, cmdline playos.data_uuid=)\n");
+        log_available_block_devices();
         return -1;
     }
 
@@ -515,13 +547,89 @@ int playos_mount_data(struct playos_init_state *state)
 
 /* ── First-boot directories ──────────────────────────────────────── */
 
+/*
+ * Validate (or create) the /data storage version marker.
+ *
+ * First boot is detected by the marker's absence: the full directory set is
+ * already provisioned by playos_data_create_dirs() before this runs, so on a
+ * first boot we simply stamp the current version. On every later mount we
+ * read the marker and warn (but do not halt) on a version mismatch.
+ */
+static int playos_storage_version_validate(void)
+{
+    int fd = open(PLAYOS_STORAGE_VERSION_MARKER, O_RDONLY);
+    if (fd < 0) {
+        if (errno == ENOENT) {
+            /* First boot — stamp the current schema version. */
+            fd = open(PLAYOS_STORAGE_VERSION_MARKER,
+                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                dprintf(STDERR_FILENO,
+                        "playos-init: cannot create storage version marker: %s\n",
+                        strerror(errno));
+                return -1;
+            }
+            dprintf(fd, "%s\n", PLAYOS_STORAGE_VERSION_CURRENT);
+            close(fd);
+            dprintf(STDERR_FILENO,
+                    "playos-init: storage version marker created (%s)\n",
+                    PLAYOS_STORAGE_VERSION_CURRENT);
+            return 0;
+        }
+
+        dprintf(STDERR_FILENO,
+                "playos-init: cannot read storage version marker: %s\n",
+                strerror(errno));
+        return -1;
+    }
+
+    char buf[16] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (n < 0) {
+        dprintf(STDERR_FILENO,
+                "playos-init: storage version marker read error: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    buf[n] = '\0';
+
+    /* Trim trailing newline/whitespace before comparing. */
+    char *end = buf + n;
+    while (end > buf &&
+           (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' '))
+        *--end = '\0';
+
+    if (strcmp(buf, PLAYOS_STORAGE_VERSION_CURRENT) != 0) {
+        dprintf(STDERR_FILENO,
+                "playos-init: WARN storage version mismatch: found '%s', "
+                "expected '%s' — continuing\n",
+                buf, PLAYOS_STORAGE_VERSION_CURRENT);
+    } else {
+        dprintf(STDERR_FILENO,
+                "playos-init: storage version marker validated (%s)\n",
+                PLAYOS_STORAGE_VERSION_CURRENT);
+    }
+
+    return 0;
+}
+
 int playos_data_create_dirs(void)
 {
+    /* Final MVP /data layout — /data/log is the shipped singular spelling. */
     const char *dirs[] = {
         "/data/games",
         "/data/saves",
-        "/data/system",
+        "/data/cache",
         "/data/log",
+        "/data/system",
+        "/data/profiles",
+        "/data/resources",
+        "/data/downloads",
+        "/data/updates",
+        "/data/screenshots",
+        "/data/config",
         NULL
     };
 
@@ -532,6 +640,14 @@ int playos_data_create_dirs(void)
                     *d, strerror(errno));
             return -1;
         }
+    }
+
+    /* Validate the schema version on every mount; first boot stamps it. */
+    if (playos_storage_version_validate() != 0) {
+        dprintf(STDERR_FILENO,
+                "playos-init: storage provisioning incomplete "
+                "(version marker unavailable)\n");
+        return -1;
     }
 
     return 0;

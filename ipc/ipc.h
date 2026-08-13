@@ -45,6 +45,9 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_LAUNCH_GAME_ERROR   "LaunchGameError"
 #define PLAYOS_IPC_TYPE_TERMINATE_GAME_ACK  "TerminateGameAck"
 #define PLAYOS_IPC_TYPE_SHELL_READY        "ShellReady"
+#define PLAYOS_IPC_TYPE_FACTORY_RESET          "FactoryReset"
+#define PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE "FactoryResetComplete"
+#define PLAYOS_IPC_TYPE_FACTORY_RESET_ERROR    "FactoryResetError"
 
 /* ── Lifecycle event constants ─────────────────────────────── */
 
