@@ -1,6 +1,6 @@
 # PlayOS Init
 
-`playos-init` is the PID 1 process supervisor for PlayOS. It boots the immutable OS, mounts essential filesystems, discovers and mounts storage, starts the internal IPC service, supervises the compositor, and manages the system lifecycle.
+`playos-init` is the PID 1 supervisor for PlayOS. It is not intended to be a general-purpose init system; its job is to boot the system, keep core PlayOS services alive, and orchestrate the startup and lifecycle of the shell, compositor, and games.
 
 ## What it does
 
@@ -10,7 +10,8 @@
 - Creates required runtime directories
 - Starts the PlayOS IPC server on `/run/playos/control.sock`
 - Spawns and supervises the compositor
-- Launches shell / test processes once the compositor is ready
+- Starts `playos-shell` once the compositor is ready
+- Launches games and other child processes requested by the shell over IPC
 - Reaps child processes and handles recovery / shutdown flows
 
 ## Repository layout
