@@ -389,21 +389,100 @@ void playos_supervisor_spawn_test_client(struct playos_init_state *s)
     spawn_test_client(s);
 }
 
+/* ── Game manifest helpers ──────────────────────────────────────── */
+
+/*
+ * Read a whole file into a NUL-terminated buffer. Returns bytes read
+ * (>= 0) on success, -1 on error.
+ */
+static int read_whole_file(const char *path, char *buf, size_t bufsz)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, buf, bufsz - 1);
+    close(fd);
+    if (n < 0)
+        return -1;
+    buf[n] = '\0';
+    return (int)n;
+}
+
+/*
+ * Minimal JSON string extractor: return the value of "key" from a flat
+ * JSON object. Sufficient for game manifests (no nested objects, arrays,
+ * or escapes). Returns length, or -1 if the key is absent/unparseable.
+ */
+static int json_string_field(const char *json, const char *key, char *out,
+                             size_t outsz)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (!p)
+        return -1;
+    p += strlen(needle);
+    p = strchr(p, ':');
+    if (!p)
+        return -1;
+    p = strchr(p, '"');
+    if (!p)
+        return -1;
+    p++;
+    const char *end = strchr(p, '"');
+    if (!end)
+        return -1;
+    size_t len = (size_t)(end - p);
+    if (len >= outsz)
+        len = outsz - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return (int)len;
+}
+
 /* ── Game supervision ────────────────────────────────────────────── */
 
 pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
                                     const char *game_id,
                                     const char *manifest_path)
 {
-    (void)manifest_path; /* Full manifest validation in later sprint */
-
     if (s->game_state != GAME_NONE) {
         playos_log_write(s, "sup", "game launch rejected: already running");
         return -1;
     }
 
-    /* For Sprint 1: launch a placeholder game process */
-    playos_log_write(s, "sup", "spawning game: %s", game_id);
+    /* Resolve the manifest: caller-supplied path, else the canonical
+     * /data/games/<id>/manifest.json. */
+    char manifest[640];
+    if (manifest_path && manifest_path[0]) {
+        snprintf(manifest, sizeof(manifest), "%s", manifest_path);
+    } else {
+        snprintf(manifest, sizeof(manifest), "/data/games/%s/manifest.json",
+                 game_id);
+    }
+
+    /* Read the manifest for the executable (default "bin/game"). */
+    char manifest_buf[4096];
+    char executable[256] = "bin/game";
+    if (read_whole_file(manifest, manifest_buf, sizeof(manifest_buf)) > 0) {
+        char exe[256];
+        if (json_string_field(manifest_buf, "executable", exe, sizeof(exe)) > 0)
+            snprintf(executable, sizeof(executable), "%s", exe);
+    } else {
+        playos_log_write(s, "sup", "game manifest unreadable: %s", manifest);
+    }
+
+    /* The executable path is relative to the game directory. */
+    char exe_path[640];
+    snprintf(exe_path, sizeof(exe_path), "/data/games/%s/%s",
+             game_id, executable);
+    if (access(exe_path, X_OK) != 0) {
+        playos_log_write(s, "sup", "game executable not runnable: %s",
+                         exe_path);
+        return -1;
+    }
+
+    playos_log_write(s, "sup", "spawning game: %s (%s)", game_id, exe_path);
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -412,15 +491,27 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
     }
 
     if (pid == 0) {
-        /* Child: placeholder game — just keep running until killed */
+        /* Child: run the actual game binary. */
         setsid();
-        /* Simple game stub: print ID and sleep */
-        dprintf(STDERR_FILENO, "playos-game: %s starting (PID %d)\n",
-                game_id, getpid());
-        for (;;) {
-            sleep(10);
-        }
-        _exit(0);
+
+        /* Persist the game's stdout/stderr to the data partition so a
+         * crash, assertion, or loader error is visible on the USB. */
+        char log_path[256];
+        snprintf(log_path, sizeof(log_path),
+                 "/data/log/game-%s-stderr.log", game_id);
+        child_log_redirect(log_path);
+
+        /* Run from the game directory so relative assets resolve. */
+        char game_dir[640];
+        snprintf(game_dir, sizeof(game_dir), "/data/games/%s", game_id);
+        (void)chdir(game_dir);
+
+        execl(exe_path, exe_path, (char *)NULL);
+
+        /* exec failed */
+        dprintf(STDERR_FILENO, "playos-init: game exec %s failed: %s\n",
+                exe_path, strerror(errno));
+        _exit(127);
     }
 
     /* Parent */
