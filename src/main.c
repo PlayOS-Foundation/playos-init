@@ -131,21 +131,6 @@ int main(void)
                         playos_log_write(s, "test", "spawned IPC test runner PID %d", test_pid);
                     }
                 }
-
-                /* Sprint 2: Legacy test client removed — now handled by
-         * supervisor spawn_test_client in Stage 4 above */
-
-        /* Auto-run IPC integration tests (Sprint 1) */
-        if (access("/usr/bin/ipc-test-client", X_OK) == 0) {
-            pid_t test_pid = fork();
-            if (test_pid == 0) {
-                dprintf(STDERR_FILENO, "\n=== Sprint 1 Integration Tests ===\n");
-                execl("/usr/bin/ipc-test-client", "ipc-test-client", "--verbose", NULL);
-                _exit(127);
-            } else if (test_pid > 0) {
-                playos_log_write(s, "test", "spawned IPC test runner PID %d", test_pid);
-            }
-        }
             }
         }
 
