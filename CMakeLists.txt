@@ -25,6 +25,7 @@ set(PLAYOS_INIT_SOURCES
     src/supervisor.c
     src/shutdown.c
     src/ipc_handler.c
+    src/audio_debug.c
     # IPC framing from playos-runtime (bundled copy)
     ipc/ipc_framing.c
     ipc/ipc_server.c

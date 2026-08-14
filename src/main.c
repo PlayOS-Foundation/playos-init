@@ -34,6 +34,7 @@ void playos_log_init(struct playos_init_state *s);
 void playos_log_write(struct playos_init_state *s, const char *tag,
                       const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
+void playos_audio_debug_dump(void);
 
 /* ── Boot banner ─────────────────────────────────────────────────── */
 
@@ -91,6 +92,11 @@ int main(void)
         /* /data/log now exists — persist the boot trace to the USB. */
         playos_log_open_persistent(s);
         playos_log_write(s, "init", "persistent log opened on /data/log/init.log");
+
+        /* Snapshot the ALSA topology + kernel audio log for on-device
+         * diagnostics (best-effort, never fatal). */
+        playos_audio_debug_dump();
+        playos_log_write(s, "init", "audio diagnostics written to /data/log/audio-debug.log");
     }
 
     /* Stage 3: Set up IPC sockets */
@@ -125,6 +131,7 @@ int main(void)
         if (first_loop) {
             first_loop = 0;
 
+#ifdef PLAYOS_ENABLE_IPC_TESTS
             /* Sprint 2: Wait for compositor readiness before running tests */
             if (s->compositor_state != COMPOSITOR_RUNNING) {
                 dprintf(STDERR_FILENO, "playos-init: waiting for compositor...\n");
@@ -142,6 +149,7 @@ int main(void)
                     }
                 }
             }
+#endif /* PLAYOS_ENABLE_IPC_TESTS */
         }
 
         /* Process incoming IPC connections */
