@@ -155,13 +155,37 @@ static void dbg_list_dir(const char *path, const char *heading)
 
 /* ── I2C / ACPI amp-enumeration dump ─────────────────────────────── */
 
+/* Read a small sysfs attribute into buf, newline-stripped. Returns length,
+ * or -1 on error. */
+static int dbg_read_attr(const char *path, char *buf, size_t size)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, buf, size - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+
+    buf[n] = '\0';
+    char *nl = strchr(buf, '\n');
+    if (nl)
+        *nl = '\0';
+    return (int)strlen(buf);
+}
+
 /* The CS35L41 amps are ACPI I2C devices (HID "CSC3551") on a DesignWare
- * controller. If they never bind, this shows whether the adapter is present
- * and whether the ACPI devices exist in the namespace. */
+ * controller. If they never bind, this shows whether the adapter is present,
+ * which ACPI controller node each amp lives under (its `path`), and whether
+ * the ACPI node has been bound to a physical I2C client (`physical_node`). */
 static void dbg_dump_i2c(void)
 {
     dbg_list_dir("/sys/class/i2c-adapter", "I2C adapters (/sys/class/i2c-adapter)");
     dbg_list_dir("/sys/bus/i2c/devices", "I2C devices (/sys/bus/i2c/devices)");
+    dbg_list_dir("/sys/bus/platform/devices", "Platform devices (/sys/bus/platform/devices)");
+    dbg_list_dir("/sys/bus/acpi/devices", "ACPI devices (/sys/bus/acpi/devices)");
 
     DIR *dir = opendir("/sys/bus/acpi/devices");
     struct dirent *de;
@@ -178,21 +202,28 @@ static void dbg_dump_i2c(void)
             continue;
         found++;
 
-        char path[320];
-        snprintf(path, sizeof(path),
-                 "/sys/bus/acpi/devices/%s/status", de->d_name);
-        int fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            char b[64];
-            ssize_t n = read(fd, b, sizeof(b) - 1);
-            if (n > 0) {
-                b[n] = '\0';
-                dbg_write("%s status=%s", de->d_name, b);
-            }
-            close(fd);
-        } else {
-            dbg_write("%s (no status: %s)\n", de->d_name, strerror(errno));
+        char path[320], val[320];
+        const char *attrs[] = { "hid", "uid", "status", "path" };
+        const char *names[] = { "hid", "uid", "status", "path" };
+
+        dbg_write("%s:", de->d_name);
+        for (size_t i = 0; i < sizeof(attrs) / sizeof(attrs[0]); i++) {
+            snprintf(path, sizeof(path),
+                     "/sys/bus/acpi/devices/%s/%s", de->d_name, attrs[i]);
+            if (dbg_read_attr(path, val, sizeof(val)) >= 0)
+                dbg_write(" %s=%s", names[i], val);
         }
+
+        /* physical_node symlink target shows the I2C client when bound. */
+        snprintf(path, sizeof(path),
+                 "/sys/bus/acpi/devices/%s/physical_node", de->d_name);
+        char target[320];
+        ssize_t tl = readlink(path, target, sizeof(target) - 1);
+        if (tl >= 0) {
+            target[tl] = '\0';
+            dbg_write(" physical_node=%s", target);
+        }
+        dbg_write("\n");
     }
     if (!found)
         dbg_write("(none)\n");
