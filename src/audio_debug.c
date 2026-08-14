@@ -22,7 +22,7 @@
 #include "playos-init/init.h"
 
 #define AUDIO_DEBUG_PATH "/data/log/audio-debug.log"
-#define MAX_DUMP_BYTES   (256 * 1024)
+#define MAX_DUMP_BYTES   (512 * 1024)
 
 static int dbg_fd = -1;
 static size_t dbg_total = 0;
@@ -117,45 +117,117 @@ static void dbg_dump_alsa(void)
     }
 }
 
-/* ── Kernel audio log dump ───────────────────────────────────────── */
+/* ── Directory listing dump ──────────────────────────────────────── */
+
+/* List a directory's entry names, resolving symlink targets. Used for the
+ * I2C topology so we can see whether the DesignWare controller registered an
+ * adapter and whether the CS35L41 (CSC3551) amps enumerated. */
+static void dbg_list_dir(const char *path, const char *heading)
+{
+    DIR *dir = opendir(path);
+    struct dirent *de;
+
+    if (dir == NULL) {
+        dbg_write("--- %s: %s\n", path, strerror(errno));
+        return;
+    }
+
+    dbg_write("=== %s ===\n", heading);
+    while ((de = readdir(dir)) != NULL) {
+        char link[320], target[320];
+        ssize_t tl;
+
+        if (de->d_name[0] == '.')
+            continue;
+
+        snprintf(link, sizeof(link), "%s/%s", path, de->d_name);
+        tl = readlink(link, target, sizeof(target) - 1);
+        if (tl >= 0) {
+            target[tl] = '\0';
+            dbg_write("%s -> %s\n", de->d_name, target);
+        } else {
+            dbg_write("%s\n", de->d_name);
+        }
+    }
+    closedir(dir);
+    dbg_write("\n");
+}
+
+/* ── I2C / ACPI amp-enumeration dump ─────────────────────────────── */
+
+/* The CS35L41 amps are ACPI I2C devices (HID "CSC3551") on a DesignWare
+ * controller. If they never bind, this shows whether the adapter is present
+ * and whether the ACPI devices exist in the namespace. */
+static void dbg_dump_i2c(void)
+{
+    dbg_list_dir("/sys/class/i2c-adapter", "I2C adapters (/sys/class/i2c-adapter)");
+    dbg_list_dir("/sys/bus/i2c/devices", "I2C devices (/sys/bus/i2c/devices)");
+
+    DIR *dir = opendir("/sys/bus/acpi/devices");
+    struct dirent *de;
+
+    dbg_write("=== ACPI CSC3551 devices ===\n");
+    if (dir == NULL) {
+        dbg_write("--- /sys/bus/acpi/devices: %s\n", strerror(errno));
+        return;
+    }
+
+    int found = 0;
+    while ((de = readdir(dir)) != NULL) {
+        if (strncmp(de->d_name, "CSC3551", 7) != 0)
+            continue;
+        found++;
+
+        char path[320];
+        snprintf(path, sizeof(path),
+                 "/sys/bus/acpi/devices/%s/status", de->d_name);
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            char b[64];
+            ssize_t n = read(fd, b, sizeof(b) - 1);
+            if (n > 0) {
+                b[n] = '\0';
+                dbg_write("%s status=%s", de->d_name, b);
+            }
+            close(fd);
+        } else {
+            dbg_write("%s (no status: %s)\n", de->d_name, strerror(errno));
+        }
+    }
+    if (!found)
+        dbg_write("(none)\n");
+    closedir(dir);
+    dbg_write("\n");
+}
+
+/* ── Kernel log dump ─────────────────────────────────────────────── */
 
 static void dbg_dump_kmsg(void)
 {
-    char buf[4096];
+    char buf[8192];
     ssize_t n;
     int fd;
 
-    /* /proc/kmsg yields the unread kernel ring buffer (read-once).
-     * In the production image klogd is not running, so this contains the
-     * full boot trace including the snd_hda / realtek / cs35l41 probe. */
+    /* /proc/kmsg yields the unread kernel ring buffer (read-once). In the
+     * production image klogd is not running, so this contains the full boot
+     * trace. We dump it unfiltered: the previous audio-only filter hid the
+     * DesignWare I2C / AMD PSP-CCP / deferred-probe lines that are needed to
+     * see why the CS35L41 amps don't bind. */
     fd = open("/proc/kmsg", O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         dbg_write("--- /proc/kmsg: %s\n", strerror(errno));
         return;
     }
 
-    dbg_write("=== kernel audio log (filtered) ===\n");
+    dbg_write("=== kernel log (full) ===\n");
     while (dbg_total < MAX_DUMP_BYTES &&
            (n = read(fd, buf, sizeof(buf))) > 0) {
-        /* kmsg records are '<prio>,seq,ts,flags;text' — keep only lines
-         * mentioning the audio stack. */
-        char *line = buf;
-        char *end;
-        buf[n] = '\0';
-        while ((end = strchr(line, '\n')) != NULL && dbg_total < MAX_DUMP_BYTES) {
-            *end = '\0';
-            if (strstr(line, "snd") || strstr(line, "hda") ||
-                strstr(line, "HDA") || strstr(line, "alc") ||
-                strstr(line, "ALC") || strstr(line, "cs35l41") ||
-                strstr(line, "CS35L41") || strstr(line, "azx") ||
-                strstr(line, "soundwire") || strstr(line, "sof") ||
-                strstr(line, "codec")) {
-                dbg_write("%s\n", line);
-            }
-            line = end + 1;
-        }
+        ssize_t w = write(dbg_fd, buf, (size_t)n);
+        (void)w;
+        dbg_total += (size_t)n;
     }
     close(fd);
+    dbg_write("\n");
 }
 
 /* ── Public entry point ──────────────────────────────────────────── */
@@ -172,6 +244,7 @@ void playos_audio_debug_dump(void)
     dbg_write("=======================\n\n");
 
     dbg_dump_alsa();
+    dbg_dump_i2c();
     dbg_dump_kmsg();
 
     fsync(dbg_fd);
