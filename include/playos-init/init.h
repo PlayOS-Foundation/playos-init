@@ -18,8 +18,16 @@
 #define PLAYOS_SHELL_MAX_RESTARTS       5
 #define PLAYOS_SHELL_WINDOW_S           30
 #define PLAYOS_SHELL_RESTART_DELAY_MS   250
+#define PLAYOS_OVERLAY_MAX_RESTARTS     5
+#define PLAYOS_OVERLAY_WINDOW_S         30
+#define PLAYOS_OVERLAY_RESTART_DELAY_MS 250
 #define PLAYOS_GAME_EXIT_TIMEOUT_MS     2000
+#define PLAYOS_GAME_PAUSE_TIMEOUT_MS    500
 #define PLAYOS_LOG_RING_SIZE            (64 * 1024)
+
+/* Current platform API version accepted for game manifests
+ * (kept in sync with playos-spec/src/playos-init-spec.md). */
+#define PLAYOS_API_VERSION              1
 
 #define PLAYOS_SOCK_CONTROL    "/run/playos/control.sock"
 #define PLAYOS_SOCK_COMPOSITOR "/run/playos/compositor.sock"
@@ -80,16 +88,25 @@ struct playos_init_state {
 	pid_t                     shell_pid;
 	struct playos_restart_info shell_restarts;
 
+    /* Overlay supervision */
+    pid_t                     overlay_pid;
+    struct playos_restart_info overlay_restarts;
+
     /* Game supervision */
     pid_t               game_pid;
     enum playos_game_state game_state;
     char                game_id[256];
     char                launch_token[64];
     int                 lifecycle_write_fd;   /* write end of game lifecycle pipe */
+    int                 game_backgrounded;    /* overlay covering the game (Sprint 7) */
+    int                 game_stopped;         /* SIGSTOP sent to game (Sprint 7) */
+    long long           bg_since_ms;          /* monotonic ms when BACKGROUND was delivered */
 
     /* IPC */
     int control_sock_fd;
     int compositor_sock_fd;
+    int shell_listener_fd;    /* persistent ShellReady connection (async events) */
+    int compositor_conn_fd;   /* accepted compositor control connection */
 
     /* Logging */
     int  log_fd;              /* /run/playos/log/init.log (tmpfs, always)   */

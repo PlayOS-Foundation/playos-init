@@ -19,6 +19,7 @@
 #include "playos-init/init.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/mount.h"
+#include "playos-init/ipc_handler.h"
 #include "ipc.h"
 
 /* ── External logging ────────────────────────────────────────────── */
@@ -32,10 +33,18 @@ void playos_log_fatal(struct playos_init_state *s, const char *tag,
 
 /* ── Forward declarations ────────────────────────────────────────── */
 
+static long long
+monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+}
+
 static void compositor_restart(struct playos_init_state *s);
 static int compositor_should_restart(struct playos_init_state *s);
 static void spawn_shell(struct playos_init_state *s);
-static void spawn_test_client(struct playos_init_state *s);
+static void spawn_overlay(struct playos_init_state *s);
 
 /* ── Persistent child logging ────────────────────────────────────── */
 
@@ -45,7 +54,7 @@ static void spawn_test_client(struct playos_init_state *s);
  * going to the console as before. */
 static void child_log_redirect(const char *path)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0)
         return;
     dup2(fd, STDOUT_FILENO);
@@ -126,6 +135,17 @@ void playos_supervisor_reap_children(struct playos_init_state *s)
                 signal_num = WTERMSIG(wstatus);
 
             playos_supervisor_shell_exited(s, exit_code, signal_num);
+        } else if (pid == s->overlay_pid) {
+            /* Overlay exited */
+            int exit_code = -1;
+            int signal_num = 0;
+
+            if (WIFEXITED(wstatus))
+                exit_code = WEXITSTATUS(wstatus);
+            if (WIFSIGNALED(wstatus))
+                signal_num = WTERMSIG(wstatus);
+
+            playos_supervisor_overlay_exited(s, exit_code, signal_num);
         } else {
             /* Unknown child — log and move on */
             playos_log_write(s, "sup", "reaped unknown child PID %d", pid);
@@ -150,7 +170,7 @@ int playos_supervisor_spawn_compositor(struct playos_init_state *s)
     if (pid == 0) {
         /* Child: set up Wayland/DRM environment before exec */
         setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
-        setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+        setenv("WAYLAND_DISPLAY", "playos-0", 1);
         setenv("PLAYOS_BACKEND", "drm", 1);
 
         /* Persist stderr (trace markers, wlr_log) to /data for
@@ -328,7 +348,7 @@ static void spawn_shell(struct playos_init_state *s)
 	if (pid == 0) {
 		/* Child: same Wayland env as compositor */
 		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
-		setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+		setenv("WAYLAND_DISPLAY", "playos-0", 1);
 
 		/* Persist shell stderr (EGL/Wayland errors, fps) to /data */
 		child_log_redirect("/data/log/shell-stderr.log");
@@ -351,43 +371,94 @@ void playos_supervisor_spawn_shell(struct playos_init_state *s)
 	spawn_shell(s);
 }
 
+/* ── Overlay supervision (Sprint 7) ───────────────────────────────── */
 
-static void spawn_test_client(struct playos_init_state *s)
+static void spawn_overlay(struct playos_init_state *s)
 {
-    const char *path = "/usr/bin/playos-test-client";
+	const char *path = "/usr/bin/playos-overlay";
 
-    playos_log_write(s, "sup", "spawning test client: %s", path);
+	playos_log_write(s, "sup", "spawning overlay: %s", path);
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        playos_log_write(s, "sup", "test-client fork failed: %s",
-                         strerror(errno));
-        return;
-    }
+	pid_t pid = fork();
+	if (pid < 0) {
+		playos_log_write(s, "sup", "overlay fork failed: %s",
+		                 strerror(errno));
+		return;
+	}
 
-    if (pid == 0) {
-        /* Child: same Wayland env as compositor */
-        setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
-        setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+	if (pid == 0) {
+		/* Child: same Wayland env as compositor */
+		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
+		setenv("WAYLAND_DISPLAY", "playos-0", 1);
 
-        /* Persist client stderr (EGL/Wayland errors, fps) to /data */
-        child_log_redirect("/data/log/test-client.log");
+		/* Persist overlay stderr to /data for debugging */
+		child_log_redirect("/data/log/overlay-stderr.log");
 
-        execl(path, path, NULL);
+		execl(path, path, NULL);
 
-        dprintf(STDERR_FILENO,
-                "playos-init: test-client exec failed: %s\n",
-                strerror(errno));
-        _exit(127);
-    }
+		dprintf(STDERR_FILENO,
+		        "playos-init: overlay exec failed: %s\n",
+		        strerror(errno));
+		_exit(127);
+	}
 
-    /* Parent: track as child, not supervised like compositor */
-    playos_log_write(s, "sup", "test client launched (PID %d)", pid);
+	/* Parent: track as child */
+	s->overlay_pid = pid;
+	playos_log_write(s, "sup", "overlay launched (PID %d)", pid);
 }
 
-void playos_supervisor_spawn_test_client(struct playos_init_state *s)
+static int overlay_should_restart(struct playos_init_state *s)
 {
-    spawn_test_client(s);
+	time_t now = time(NULL);
+	struct playos_restart_info *r = &s->overlay_restarts;
+
+	if (now - r->window_start > PLAYOS_OVERLAY_WINDOW_S) {
+		r->count = 0;
+		r->window_start = now;
+	}
+
+	r->count++;
+	return (r->count <= PLAYOS_OVERLAY_MAX_RESTARTS);
+}
+
+static void overlay_restart(struct playos_init_state *s)
+{
+	playos_log_write(s, "sup",
+	                 "restarting overlay in %d ms (attempt %d)",
+	                 PLAYOS_OVERLAY_RESTART_DELAY_MS,
+	                 s->overlay_restarts.count);
+
+	usleep(PLAYOS_OVERLAY_RESTART_DELAY_MS * 1000);
+
+	spawn_overlay(s);
+}
+
+void playos_supervisor_overlay_exited(struct playos_init_state *s,
+                                      int exit_code, int signal_num)
+{
+	s->overlay_restarts.last_exit_code = exit_code;
+	s->overlay_restarts.last_signal = signal_num;
+
+	playos_log_write(s, "sup",
+	                 "overlay PID %d exited: code=%d signal=%d",
+	                 s->overlay_pid, exit_code, signal_num);
+
+	s->overlay_pid = 0;
+
+	if (overlay_should_restart(s)) {
+		overlay_restart(s);
+	} else {
+		playos_log_write(s, "sup",
+		                 "overlay restart limit exceeded (%d restarts in %ds) — "
+		                 "leaving system running without overlay",
+		                 PLAYOS_OVERLAY_MAX_RESTARTS,
+		                 PLAYOS_OVERLAY_WINDOW_S);
+	}
+}
+
+void playos_supervisor_spawn_overlay(struct playos_init_state *s)
+{
+	spawn_overlay(s);
 }
 
 /* ── Game manifest helpers ──────────────────────────────────────── */
@@ -441,7 +512,72 @@ static int json_string_field(const char *json, const char *key, char *out,
     return (int)len;
 }
 
+/*
+ * Minimal JSON integer extractor: return the value of "key" from a flat
+ * JSON object. Returns 0 and stores the value on success, -1 otherwise.
+ */
+static int json_int_field(const char *json, const char *key, int *out)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (!p)
+        return -1;
+    p = strchr(p, ':');
+    if (!p)
+        return -1;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+    if (*p == '\0')
+        return -1;
+    char *end = NULL;
+    long val = strtol(p, &end, 10);
+    if (end == p)
+        return -1;
+    *out = (int)val;
+    return 0;
+}
+
 /* ── Game supervision ────────────────────────────────────────────── */
+
+int playos_supervisor_generate_launch_token(struct playos_init_state *s)
+{
+    unsigned char rnd[16];
+    int got = 0;
+
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, rnd, sizeof(rnd));
+        close(fd);
+        if (n == (ssize_t)sizeof(rnd))
+            got = 1;
+    }
+
+    if (!got) {
+        /* Deterministic fallback for early-boot when /dev/urandom is not
+         * yet available. Still unpredictable enough for a per-launch
+         * correlation token. */
+        unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
+        for (size_t i = 0; i < sizeof(rnd); i++) {
+            seed = seed * 1103515245u + 12345u;
+            rnd[i] = (unsigned char)((seed >> 16) & 0xff);
+        }
+    }
+
+    char *p = s->launch_token;
+    size_t cap = sizeof(s->launch_token);
+    for (size_t i = 0; i < sizeof(rnd) && cap > 2; i++) {
+        int n = snprintf(p, cap, "%02x", rnd[i]);
+        if (n < 0 || (size_t)n >= cap)
+            break;
+        p += n;
+        cap -= (size_t)n;
+    }
+
+    playos_log_write(s, "sup", "generated launch token %s", s->launch_token);
+    return 0;
+}
 
 pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
                                     const char *game_id,
@@ -462,15 +598,27 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
                  game_id);
     }
 
-    /* Read the manifest for the executable (default "bin/game"). */
+    /* Read the manifest for the executable and validate api_version. */
     char manifest_buf[4096];
     char executable[256] = "bin/game";
-    if (read_whole_file(manifest, manifest_buf, sizeof(manifest_buf)) > 0) {
+    if (read_whole_file(manifest, manifest_buf, sizeof(manifest_buf)) <= 0) {
+        playos_log_write(s, "sup", "game manifest unreadable: %s", manifest);
+        return -1;
+    }
+
+    int api = 0;
+    (void)json_int_field(manifest_buf, "api_version", &api);
+    if (api > PLAYOS_API_VERSION) {
+        playos_log_write(s, "sup",
+                         "game api_version %d exceeds supported %d: %s",
+                         api, PLAYOS_API_VERSION, manifest);
+        return -1;
+    }
+
+    {
         char exe[256];
         if (json_string_field(manifest_buf, "executable", exe, sizeof(exe)) > 0)
             snprintf(executable, sizeof(executable), "%s", exe);
-    } else {
-        playos_log_write(s, "sup", "game manifest unreadable: %s", manifest);
     }
 
     /* The executable path is relative to the game directory. */
@@ -518,7 +666,18 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
          * socket. Without these the game's InitWindow() fails and the
          * process exits before drawing a single frame. */
         setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
-        setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+        setenv("WAYLAND_DISPLAY", "playos-0", 1);
+        setenv("PLAYOS_GAME_ID", game_id, 1);
+        {
+            char p[640];
+            snprintf(p, sizeof(p), "/data/games/%s", game_id);
+            setenv("PLAYOS_INSTALL_PATH", p, 1);
+            snprintf(p, sizeof(p), "/data/saves/%s", game_id);
+            setenv("PLAYOS_SAVE_PATH", p, 1);
+            snprintf(p, sizeof(p), "/data/cache/%s", game_id);
+            setenv("PLAYOS_CACHE_PATH", p, 1);
+        }
+        setenv("PLAYOS_LAUNCH_TOKEN", s->launch_token, 1);
 
         /* Hand the read end of the lifecycle pipe to the game. */
         if (lifecycle_read_fd >= 0) {
@@ -559,6 +718,16 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
     strncpy(s->game_id, game_id, sizeof(s->game_id) - 1);
     s->game_id[sizeof(s->game_id) - 1] = '\0';
 
+    /* Fresh process: clear any stale lifecycle state. */
+    s->game_backgrounded = 0;
+    s->game_stopped      = 0;
+    s->bg_since_ms       = 0;
+
+    /* S7-T8: a cooperative game learns it is live via FOREGROUND. */
+    if (s->lifecycle_write_fd >= 0)
+        playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                    PLAYOS_LIFECYCLE_FOREGROUND);
+
     playos_log_write(s, "sup", "game spawned: %s PID %d", game_id, pid);
     return pid;
 }
@@ -574,11 +743,22 @@ int playos_supervisor_terminate_game(struct playos_init_state *s, int force)
                      s->game_id, force);
 
     s->game_state = GAME_STOPPING;
+    s->game_backgrounded = 0;
+    s->bg_since_ms = 0;
 
     if (force) {
         /* Immediate kill */
         kill(s->game_pid, SIGKILL);
     } else {
+        /* If the game was SIGSTOPped (backgrounded, non-cooperative), it
+         * must be SIGCONT'd first or it will never run its SIGTERM
+         * handler and the 2s grace escalation below would SIGKILL a
+         * process that never got a chance to exit cleanly. */
+        if (s->game_stopped) {
+            kill(s->game_pid, SIGCONT);
+            s->game_stopped = 0;
+        }
+
         /* Graceful: signal the game to save state and exit, then
          * SIGTERM as a fallback for games not reading the pipe. */
         if (s->lifecycle_write_fd >= 0)
@@ -602,14 +782,125 @@ void playos_supervisor_game_exited(struct playos_init_state *s,
                      "game %s PID %d exited: code=%d signal=%d",
                      s->game_id, s->game_pid, exit_code, signal_num);
 
+    /* A crash is any abnormal termination: killed by a signal, or a
+     * non-zero exit code. Emit to the shell before clearing game_id so
+     * the notification can carry the departed game's identity. */
+    int crashed = (signal_num != 0) || (exit_code != 0);
+    char exit_json[384];
+
+    if (crashed) {
+        snprintf(exit_json, sizeof(exit_json),
+                 "\"game_id\":\"%s\",\"exit_code\":%d,\"signal\":%d",
+                 s->game_id, exit_code, signal_num);
+        playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_GAME_CRASHED,
+                                 exit_json);
+    } else {
+        snprintf(exit_json, sizeof(exit_json),
+                 "\"game_id\":\"%s\",\"exit_code\":%d",
+                 s->game_id, exit_code);
+        playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_GAME_EXITED,
+                                 exit_json);
+    }
+
     if (s->lifecycle_write_fd >= 0) {
         close(s->lifecycle_write_fd);
         s->lifecycle_write_fd = -1;
     }
 
-    s->game_pid = 0;
-    s->game_id[0] = '\0';
-    s->game_state = GAME_NONE;
+    s->game_pid         = 0;
+    s->game_id[0]       = '\0';
+    s->game_state       = GAME_NONE;
+    s->game_backgrounded = 0;
+    s->game_stopped      = 0;
+    s->bg_since_ms       = 0;
+}
+
+/*
+ * Background the game (overlay shown over it). Delivers the cooperative
+ * BACKGROUND event and arms the non-cooperative SIGSTOP timer, which
+ * playos_supervisor_lifecycle_tick() escalates after
+ * PLAYOS_GAME_PAUSE_TIMEOUT_MS.
+ */
+void
+playos_supervisor_game_background(struct playos_init_state *s)
+{
+    if (s->game_pid <= 0) {
+        s->game_backgrounded = 0;
+        s->game_stopped      = 0;
+        return;
+    }
+
+    if (s->game_backgrounded)
+        return;   /* already backgrounded */
+
+    s->game_backgrounded = 1;
+    s->bg_since_ms = monotonic_ms();
+
+    if (s->lifecycle_write_fd >= 0)
+        playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                    PLAYOS_LIFECYCLE_BACKGROUND);
+
+    playos_log_write(s, "sup", "game backgrounded (SIGSTOP armed in %dms)",
+                     PLAYOS_GAME_PAUSE_TIMEOUT_MS);
+}
+
+/*
+ * Foreground the game (overlay dismissed / game surfaced). Resumes a
+ * non-cooperatively stopped game before delivering the cooperative
+ * FOREGROUND event so it can actually run its handler.
+ */
+void
+playos_supervisor_game_foreground(struct playos_init_state *s)
+{
+    if (s->game_pid <= 0) {
+        s->game_backgrounded = 0;
+        s->game_stopped      = 0;
+        return;
+    }
+
+    s->game_backgrounded = 0;
+    s->bg_since_ms = 0;
+
+    if (s->game_stopped) {
+        if (kill(s->game_pid, SIGCONT) == 0) {
+            playos_log_write(s, "sup", "game %d SIGCONT sent", s->game_pid);
+        } else {
+            playos_log_write(s, "sup", "SIGCONT failed: %s", strerror(errno));
+        }
+        s->game_stopped = 0;
+    }
+
+    if (s->lifecycle_write_fd >= 0)
+        playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                    PLAYOS_LIFECYCLE_FOREGROUND);
+
+    playos_log_write(s, "sup", "game foregrounded");
+}
+
+/*
+ * Non-cooperative SIGSTOP fallback (S7-T5). Called from the main
+ * supervision loop; sends SIGSTOP if a backgrounded game has not paused
+ * within PLAYOS_GAME_PAUSE_TIMEOUT_MS of receiving BACKGROUND.
+ */
+void
+playos_supervisor_lifecycle_tick(struct playos_init_state *s)
+{
+    if (s->game_pid <= 0 || !s->game_backgrounded || s->game_stopped)
+        return;
+
+    long long elapsed_ms = monotonic_ms() - s->bg_since_ms;
+
+    if (elapsed_ms < (long long)PLAYOS_GAME_PAUSE_TIMEOUT_MS)
+        return;
+
+    if (kill(s->game_pid, SIGSTOP) == 0) {
+        s->game_stopped = 1;
+        playos_log_write(s, "sup",
+                         "game %d SIGSTOP sent (non-cooperative)",
+                         s->game_pid);
+    } else {
+        playos_log_write(s, "sup", "SIGSTOP failed: %s", strerror(errno));
+    }
 }
 
 /* ── Recovery ────────────────────────────────────────────────────── */

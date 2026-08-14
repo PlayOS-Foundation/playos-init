@@ -22,7 +22,6 @@
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
 #include "playos-init/supervisor.h"
-#include "playos-init/recovery.h"
 #include "playos-init/ipc_handler.h"
 
 /* ── Global state ────────────────────────────────────────────────── */
@@ -98,6 +97,9 @@ int main(void)
     playos_boot_stage_write(BOOT_STAGE_IPC_READY);
     playos_ipc_server_start(s);
     playos_log_write(s, "init", "IPC server started on /run/playos/control.sock");
+    playos_compositor_server_start(s);
+    playos_log_write(s, "init",
+                     "compositor control server started on /run/playos/compositor.sock");
 
     /* Stage 4: Spawn compositor */
     playos_boot_stage_write(BOOT_STAGE_COMPOSITOR);
@@ -107,6 +109,7 @@ int main(void)
         /* Compositor is running — launch visual test client */
         usleep(500000); /* 500ms grace period for compositor to fully init */
         playos_supervisor_spawn_shell(s);
+        playos_supervisor_spawn_overlay(s);
     }
 
     /* Stage 5: System ready */
@@ -143,9 +146,13 @@ int main(void)
 
         /* Process incoming IPC connections */
         playos_ipc_server_poll(s);
+        playos_compositor_server_poll(s);
 
         /* Reap any zombie children */
         playos_supervisor_reap_children(s);
+
+        /* Non-cooperative game SIGSTOP fallback (Sprint 7) */
+        playos_supervisor_lifecycle_tick(s);
 
         /*
          * Check recovery flag set by IPC handler or supervisor

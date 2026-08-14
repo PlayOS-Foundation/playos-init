@@ -25,14 +25,23 @@ int playos_supervisor_terminate_game(struct playos_init_state *state, int force)
 void playos_supervisor_game_exited(struct playos_init_state *state,
                                     int exit_code, int signal);
 
+/* Background the game (overlay shown): deliver PLAYOS_LIFECYCLE_BACKGROUND
+ * and arm the non-cooperative SIGSTOP timer (Sprint 7). */
+void playos_supervisor_game_background(struct playos_init_state *state);
+
+/* Foreground the game (overlay dismissed): SIGCONT if stopped, then
+ * deliver PLAYOS_LIFECYCLE_FOREGROUND (Sprint 7). */
+void playos_supervisor_game_foreground(struct playos_init_state *state);
+
+/* Non-cooperative SIGSTOP fallback tick — call from the main loop. Sends
+ * SIGSTOP if a backgrounded game hasn't paused within the timeout. */
+void playos_supervisor_lifecycle_tick(struct playos_init_state *state);
+
 /* Reap all zombie children. Call from SIGCHLD handler or event loop. */
 void playos_supervisor_reap_children(struct playos_init_state *state);
 
 /* Register SIGCHLD handler */
 int playos_supervisor_init_signal_handler(void);
-
-/* Launch the hardware-accelerated test client for visual diagnostics */
-void playos_supervisor_spawn_test_client(struct playos_init_state *state);
 
 /* Launch the PlayOS shell as a Wayland client (Sprint 5) */
 void playos_supervisor_spawn_shell(struct playos_init_state *state);
@@ -40,6 +49,16 @@ void playos_supervisor_spawn_shell(struct playos_init_state *state);
 /* Handle shell exit. Restarts if within limits. */
 void playos_supervisor_shell_exited(struct playos_init_state *state,
                                      int exit_code, int signal);
+
+/* Generate a random launch token for a game launch (Sprint 7) */
+int playos_supervisor_generate_launch_token(struct playos_init_state *s);
+
+/* Launch the PlayOS overlay as a Wayland client (Sprint 7) */
+void playos_supervisor_spawn_overlay(struct playos_init_state *s);
+
+/* Handle overlay exit. Restarts if within limits. */
+void playos_supervisor_overlay_exited(struct playos_init_state *s,
+                                      int exit_code, int signal);
 
 /* Enter recovery mode */
 void playos_enter_recovery(struct playos_init_state *state, const char *reason);

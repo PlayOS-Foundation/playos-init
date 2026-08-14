@@ -25,5 +25,10 @@ void playos_init_state_init(struct playos_init_state *s)
     s->log_fd = -1;
     s->log_fd_persistent = -1;
     s->compositor_restarts.window_start = time(NULL);
+    s->shell_pid = 0;
+    s->overlay_pid = 0;
+    s->shell_listener_fd = -1;
+    s->compositor_conn_fd = -1;
+    s->overlay_restarts.window_start = time(NULL);
     s->recovery_mode = 0;
 }

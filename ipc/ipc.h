@@ -49,6 +49,17 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE "FactoryResetComplete"
 #define PLAYOS_IPC_TYPE_FACTORY_RESET_ERROR    "FactoryResetError"
 
+/* ── Compositor control (Sprint 7) ─────────────────────────── */
+/* init → compositor */
+#define PLAYOS_IPC_TYPE_SET_EXPECTED_GAME    "SetExpectedGame"
+#define PLAYOS_IPC_TYPE_CLEAR_EXPECTED_GAME  "ClearExpectedGame"
+#define PLAYOS_IPC_TYPE_FORCE_TERMINATE_GAME "ForceTerminateGame"
+#define PLAYOS_IPC_TYPE_SHOW_OVERLAY         "ShowOverlay"
+#define PLAYOS_IPC_TYPE_HIDE_OVERLAY         "HideOverlay"
+/* compositor → init */
+#define PLAYOS_IPC_TYPE_GAME_SURFACE_READY   "GameSurfaceReady"
+#define PLAYOS_IPC_TYPE_COMPOSITOR_STATE_CHANGED "CompositorStateChanged"
+
 /* ── Lifecycle event constants ─────────────────────────────── */
 
 /* These byte values MUST match the PlayOSLifecycleEvent enum in

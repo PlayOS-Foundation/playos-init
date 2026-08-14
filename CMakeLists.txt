@@ -23,8 +23,6 @@ set(PLAYOS_INIT_SOURCES
     src/mount.c
     src/logging.c
     src/supervisor.c
-    src/child_process.c
-    src/recovery.c
     src/shutdown.c
     src/ipc_handler.c
     # IPC framing from playos-runtime (bundled copy)
@@ -38,7 +36,6 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/init.h
     include/playos-init/mount.h
     include/playos-init/supervisor.h
-    include/playos-init/recovery.h
     include/playos-init/shutdown.h
 )
 

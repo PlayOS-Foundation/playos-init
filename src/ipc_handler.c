@@ -25,6 +25,8 @@
 
 #include "playos-init/init.h"
 #include "playos-init/shutdown.h"
+#include "playos-init/supervisor.h"
+#include "playos-init/ipc_handler.h"
 
 /* ── External dependencies ───────────────────────────────────────── */
 
@@ -100,6 +102,48 @@ static int json_get_bool(const char *json, const char *field, int *out)
     }
 
     return -1;
+}
+
+/*
+ * Minimal JSON string extractor for a flat object: return the value of
+ * "key" (e.g. "state":"GAME_FOREGROUND"). Returns length, or -1 if the
+ * key is absent/unparseable. Sufficient for the compositor's flat
+ * CompositorStateChanged payload.
+ */
+static int json_string_field(const char *json, const char *key, char *out,
+                             size_t outsz)
+{
+    if (!json || !key || !out || outsz == 0)
+        return -1;
+
+    char needle[64];
+    int n = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(needle))
+        return -1;
+
+    const char *p = strstr(json, needle);
+    if (!p)
+        return -1;
+    p += strlen(needle);
+
+    p = strchr(p, ':');
+    if (!p)
+        return -1;
+    p = strchr(p, '"');
+    if (!p)
+        return -1;
+    p++;
+
+    const char *end = strchr(p, '"');
+    if (!end)
+        return -1;
+
+    size_t len = (size_t)(end - p);
+    if (len >= outsz)
+        len = outsz - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return (int)len;
 }
 
 /*
@@ -327,24 +371,39 @@ static int handle_message(struct playos_init_state *s, int client_fd,
                          game_id,
                          manifest_path[0] ? manifest_path : "(none)");
 
+        /* Generate a per-launch token and tell the compositor which game
+         * to expect before the process starts. */
+        playos_supervisor_generate_launch_token(s);
+
+        char expected_json[384];
+        snprintf(expected_json, sizeof(expected_json),
+                 "\"launch_token\":\"%s\",\"game_id\":\"%s\"",
+                 s->launch_token, game_id);
+        playos_compositor_send(s, PLAYOS_IPC_TYPE_SET_EXPECTED_GAME,
+                               expected_json);
+
         /* Spawn the game process */
-        extern int playos_supervisor_spawn_game(struct playos_init_state *s,
-                                                const char *game_id,
-                                                const char *manifest_path);
-        extern int playos_supervisor_terminate_game(struct playos_init_state *s,
-                                                     int force);
         if (playos_supervisor_spawn_game(s, game_id, manifest_path) > 0) {
+            /* Notify the shell asynchronously that a game started. */
+            char started_json[384];
+            snprintf(started_json, sizeof(started_json),
+                     "\"game_id\":\"%s\",\"pid\":%d,\"launch_token\":\"%s\"",
+                     game_id, s->game_pid, s->launch_token);
+            playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_GAME_STARTED,
+                                     started_json);
+
             /* Game started — send acknowledgment as single SOCK_SEQPACKET frame */
             char ack_json[384];
             int ack_len = snprintf(ack_json, sizeof(ack_json),
                 "{\"v\":%d,\"type\":\"%s\","
                 "\"game_id\":\"%s\","
                 "\"pid\":%d,"
-                "\"launch_token\":\"sprint-1-test-token\"}",
+                "\"launch_token\":\"%s\"}",
                 PLAYOS_IPC_PROTOCOL_VERSION,
                 PLAYOS_IPC_TYPE_LAUNCH_GAME_ACK,
                 game_id,
-                s->game_pid);
+                s->game_pid,
+                s->launch_token);
             struct playos_ipc_frame *ack_frame = malloc(sizeof(*ack_frame) + (size_t)ack_len);
             if (ack_frame) {
                 ack_frame->magic = PLAYOS_IPC_MAGIC;
@@ -387,8 +446,6 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         playos_log_write(s, "ipc", "TerminateGame: pid=%d", s->game_pid);
 
         /* SIGTERM the game, then 2s grace, then SIGKILL */
-        extern int playos_supervisor_terminate_game(struct playos_init_state *s,
-                                                     int force);
         playos_supervisor_terminate_game(s, 0);
 
         /* Send acknowledgment as single SOCK_SEQPACKET frame */
@@ -412,7 +469,13 @@ static int handle_message(struct playos_init_state *s, int client_fd,
 
     /* ── ShellReady (Sprint 5) ────────────────────────────────── */
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_SHELL_READY) == 0) {
-        playos_log_write(s, "ipc", "shell ready notification received");
+        /* The shell becomes our persistent async-event listener. Replace
+         * any previous listener without closing the incoming fd itself. */
+        if (s->shell_listener_fd >= 0 && s->shell_listener_fd != client_fd)
+            close(s->shell_listener_fd);
+        s->shell_listener_fd = client_fd;
+        playos_log_write(s, "ipc", "shell listener registered (fd=%d)",
+                         client_fd);
         playos_ipc_message_free(&msg);
         return 0;
     }
@@ -523,6 +586,234 @@ static int handle_message(struct playos_init_state *s, int client_fd,
     return -1;
 }
 
+/* ── Persistent/dispatch helpers (Sprint 7) ───────────────────────── */
+
+typedef int (*message_handler_fn)(struct playos_init_state *s, int fd,
+                                  const char *body, size_t body_len);
+
+/*
+ * Read and dispatch a single framed message from `fd`.
+ *
+ * Returns:
+ *   0  — handler ran successfully
+ *  -1  — EOF/error (caller should close the fd)
+ *   1  — no data available within timeout_ms
+ */
+static int read_and_dispatch(struct playos_init_state *s, int fd,
+                             int timeout_ms, message_handler_fn handler)
+{
+    /* Accepted sockets are blocking by default. A peer that connects
+     * without sending (an unused probe) would otherwise stall PID 1's
+     * supervision loop inside recv(). Make it non-blocking first. */
+    int cflags = fcntl(fd, F_GETFL, 0);
+    if (cflags >= 0)
+        fcntl(fd, F_SETFL, cflags | O_NONBLOCK);
+
+    size_t buf_size = sizeof(struct playos_ipc_frame) + PLAYOS_IPC_MAX_BODY;
+    struct playos_ipc_frame *frame = malloc(buf_size);
+    if (!frame) {
+        playos_log_write(s, "ipc", "malloc failed for frame buffer");
+        return -1;
+    }
+
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    int pr = poll(&pfd, 1, timeout_ms);
+    if (pr <= 0) {
+        free(frame);
+        return 1;
+    }
+
+    ssize_t n = recv(fd, frame, buf_size, 0);
+    if (n < (ssize_t)sizeof(struct playos_ipc_frame)) {
+        free(frame);
+        return -1;
+    }
+
+    if (frame->magic != PLAYOS_IPC_MAGIC
+        || frame->length > PLAYOS_IPC_MAX_BODY
+        || (size_t)n < sizeof(struct playos_ipc_frame) + frame->length) {
+        playos_log_write(s, "ipc", "malformed frame on fd=%d", fd);
+        free(frame);
+        return -1;
+    }
+
+    int r = handler(s, fd, frame->body, (size_t)frame->length);
+    free(frame);
+    return r;
+}
+
+/*
+ * Handle a message received from the compositor over compositor.sock.
+ */
+static int handle_compositor_message(struct playos_init_state *s, int fd,
+                                     const char *raw_body, size_t body_len)
+{
+    (void)fd;
+    struct playos_ipc_message msg;
+    memset(&msg, 0, sizeof(msg));
+
+    if (playos_ipc_message_parse(raw_body, body_len, &msg) != 0) {
+        playos_log_write(s, "ipc", "compositor message parse error");
+        return -1;
+    }
+
+    playos_log_write(s, "ipc", "compositor sent type=%s",
+                     msg.type ? msg.type : "(null)");
+
+    if (msg.type) {
+        if (strcmp(msg.type, PLAYOS_IPC_TYPE_GAME_SURFACE_READY) == 0) {
+            playos_log_write(s, "ipc", "GameSurfaceReady from compositor");
+        } else if (strcmp(msg.type,
+                          PLAYOS_IPC_TYPE_COMPOSITOR_STATE_CHANGED) == 0) {
+            /* Map the compositor's foreground state onto the game's
+             * lifecycle: background + SIGSTOP fallback when the overlay
+             * covers the game, foreground + SIGCONT when it resumes.
+             * (S7-T3 / S7-T5) */
+            char state[64] = {0};
+            (void)json_string_field(msg.json_raw, "state", state,
+                                    sizeof(state));
+            playos_log_write(s, "ipc",
+                             "CompositorStateChanged state=%s", state);
+
+            if (strcmp(state, "PLAYOS_UI_FOREGROUND_WITH_GAME_BACKGROUND") == 0) {
+                playos_supervisor_game_background(s);
+            } else if (strcmp(state, "GAME_FOREGROUND") == 0) {
+                playos_supervisor_game_foreground(s);
+            } else if (strcmp(state, "SHELL_FOREGROUND") == 0 ||
+                       strcmp(state, "TERMINATING_GAME") == 0) {
+                /* Game is leaving the foreground; ensure it is never left
+                 * SIGSTOPped so termination/exit can complete. */
+                playos_supervisor_game_foreground(s);
+            }
+        } else {
+            playos_log_write(s, "ipc", "unknown compositor message: %s",
+                             msg.type);
+        }
+    }
+
+    playos_ipc_message_free(&msg);
+    return 0;
+}
+
+/*
+ * Emit an asynchronous event to the persistent shell listener.
+ */
+void playos_ipc_emit_to_shell(struct playos_init_state *s, const char *type,
+                              const char *extra_json)
+{
+    if (s->shell_listener_fd < 0) {
+        playos_log_write(s, "ipc",
+                         "no shell listener registered; dropping %s event",
+                         type);
+        return;
+    }
+
+    struct playos_ipc_message msg;
+    memset(&msg, 0, sizeof(msg));
+    if (playos_ipc_message_from_type(PLAYOS_IPC_PROTOCOL_VERSION, type,
+                                     extra_json, &msg) != 0) {
+        playos_log_write(s, "ipc", "failed to build %s event", type);
+        return;
+    }
+
+    if (playos_ipc_frame_write(s->shell_listener_fd, &msg) != 0)
+        playos_log_write(s, "ipc", "failed to emit %s to shell", type);
+
+    playos_ipc_message_free(&msg);
+}
+
+/*
+ * Send a control message to the compositor over compositor.sock.
+ */
+int playos_compositor_send(struct playos_init_state *s, const char *type,
+                           const char *extra_json)
+{
+    if (s->compositor_conn_fd < 0) {
+        playos_log_write(s, "ipc",
+                         "no compositor connection; cannot send %s", type);
+        return -1;
+    }
+
+    struct playos_ipc_message msg;
+    memset(&msg, 0, sizeof(msg));
+    if (playos_ipc_message_from_type(PLAYOS_IPC_PROTOCOL_VERSION, type,
+                                     extra_json, &msg) != 0) {
+        playos_log_write(s, "ipc", "failed to build %s message", type);
+        return -1;
+    }
+
+    int rc = playos_ipc_frame_write(s->compositor_conn_fd, &msg);
+    playos_ipc_message_free(&msg);
+    if (rc != 0)
+        playos_log_write(s, "ipc", "failed to send %s to compositor", type);
+    return rc;
+}
+
+int playos_compositor_server_start(struct playos_init_state *s)
+{
+    const char *sock_path = PLAYOS_SOCK_COMPOSITOR;
+
+    mkdir("/run/playos", 0755);
+    unlink(sock_path);
+
+    int server_fd = playos_ipc_server_create(sock_path, "playos-trusted");
+    if (server_fd < 0) {
+        playos_log_write(s, "ipc",
+                         "WARN: could not create compositor socket at %s: %s",
+                         sock_path, strerror(errno));
+        return -1;
+    }
+
+    int flags = fcntl(server_fd, F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
+
+    s->compositor_sock_fd = server_fd;
+    playos_log_write(s, "ipc", "compositor control socket listening on %s",
+                     sock_path);
+    return 0;
+}
+
+void playos_compositor_server_poll(struct playos_init_state *s)
+{
+    if (s->compositor_sock_fd < 0)
+        return;
+
+    if (s->compositor_conn_fd < 0) {
+        struct pollfd pfd = { .fd = s->compositor_sock_fd, .events = POLLIN,
+                              .revents = 0 };
+        if (poll(&pfd, 1, 0) <= 0)
+            return;
+
+        int client_fd = accept(s->compositor_sock_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                playos_log_write(s, "ipc", "compositor accept error: %s",
+                                 strerror(errno));
+            return;
+        }
+
+        if (playos_ipc_server_check_peer(client_fd, "playos-trusted") != 0) {
+            playos_log_write(s, "ipc",
+                             "rejected unauthorized compositor client fd=%d",
+                             client_fd);
+            close(client_fd);
+            return;
+        }
+
+        s->compositor_conn_fd = client_fd;
+        playos_log_write(s, "ipc", "compositor connected (fd=%d)", client_fd);
+    }
+
+    int r = read_and_dispatch(s, s->compositor_conn_fd, 0,
+                              handle_compositor_message);
+    if (r == -1) {
+        playos_log_write(s, "ipc", "compositor disconnected");
+        close(s->compositor_conn_fd);
+        s->compositor_conn_fd = -1;
+    }
+}
+
 /* ── IPC server lifecycle ────────────────────────────────────────── */
 
 int playos_ipc_server_start(struct playos_init_state *s)
@@ -563,69 +854,41 @@ void playos_ipc_server_poll(struct playos_init_state *s)
     if (s->control_sock_fd < 0)
         return;
 
-    struct pollfd pfd;
-    pfd.fd = s->control_sock_fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
+    for (;;) {
+        struct pollfd pfd = { .fd = s->control_sock_fd, .events = POLLIN,
+                              .revents = 0 };
+        if (poll(&pfd, 1, 0) <= 0)
+            break;
 
-    int ret = poll(&pfd, 1, 0); /* 0 timeout = pure poll */
-    if (ret <= 0)
-        return;
-
-    int client_fd = accept(s->control_sock_fd, NULL, NULL);
-    if (client_fd < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            playos_log_write(s, "ipc", "accept error: %s", strerror(errno));
+        int client_fd = accept(s->control_sock_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                playos_log_write(s, "ipc", "accept error: %s",
+                                 strerror(errno));
+            break;
         }
-        return;
+
+        if (playos_ipc_server_check_peer(client_fd, "playos-trusted") != 0) {
+            playos_log_write(s, "ipc", "rejected unauthorized client fd=%d",
+                             client_fd);
+            close(client_fd);
+            continue;
+        }
+
+        (void)read_and_dispatch(s, client_fd, 1000, handle_message);
+
+        /* Close every accepted fd except the one promoted to the
+         * persistent shell listener. */
+        if (s->shell_listener_fd != client_fd)
+            close(client_fd);
     }
 
-    /* Verify peer is in playos-trusted group (GID 1000 hardcoded) */
-    int peer_ok = playos_ipc_server_check_peer(client_fd, "playos-trusted");
-    if (peer_ok != 0) {
-        playos_log_write(s, "ipc", "rejected unauthorized client fd=%d",
-                         client_fd);
-        close(client_fd);
-        return;
-    }
-
-    /* Read and handle one message, then close.
-     * Use heap allocation — stack buffer of 64KB may overflow
-     * the limited stack of a statically-linked PID 1. */
-    size_t buf_size = sizeof(struct playos_ipc_frame) + PLAYOS_IPC_MAX_BODY;
-    struct playos_ipc_frame *frame = malloc(buf_size);
-    if (!frame) {
-        playos_log_write(s, "ipc", "malloc failed for frame buffer");
-        close(client_fd);
-        return;
-    }
-
-    /* The accepted socket is blocking by default. A client that connects
-     * but never sends (e.g. an unused probe connection) would otherwise
-     * stall PID 1's entire supervision loop inside recv(). Poll briefly
-     * instead so we can drop stale connections and move on. */
-    int cflags = fcntl(client_fd, F_GETFL, 0);
-    if (cflags >= 0)
-        fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
-
-    struct pollfd cpfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
-    if (poll(&cpfd, 1, 1000) <= 0) {
-        /* No message arrived within 1s — close and never block. */
-        free(frame);
-        close(client_fd);
-        return;
-    }
-
-    ssize_t n = recv(client_fd, frame, buf_size, 0);
-    if (n >= (ssize_t)sizeof(struct playos_ipc_frame)) {
-        if (frame->magic == PLAYOS_IPC_MAGIC
-            && frame->length <= PLAYOS_IPC_MAX_BODY
-            && (size_t)n >= sizeof(struct playos_ipc_frame) + frame->length) {
-            handle_message(s, client_fd, frame->body,
-                           (size_t)frame->length);
+    if (s->shell_listener_fd >= 0) {
+        int r = read_and_dispatch(s, s->shell_listener_fd, 0, handle_message);
+        if (r == -1) {
+            playos_log_write(s, "ipc", "shell listener disconnected");
+            close(s->shell_listener_fd);
+            s->shell_listener_fd = -1;
         }
     }
-
-    free(frame);
-    close(client_fd);
 }
