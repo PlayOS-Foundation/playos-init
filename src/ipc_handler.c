@@ -601,6 +601,22 @@ void playos_ipc_server_poll(struct playos_init_state *s)
         return;
     }
 
+    /* The accepted socket is blocking by default. A client that connects
+     * but never sends (e.g. an unused probe connection) would otherwise
+     * stall PID 1's entire supervision loop inside recv(). Poll briefly
+     * instead so we can drop stale connections and move on. */
+    int cflags = fcntl(client_fd, F_GETFL, 0);
+    if (cflags >= 0)
+        fcntl(client_fd, F_SETFL, cflags | O_NONBLOCK);
+
+    struct pollfd cpfd = { .fd = client_fd, .events = POLLIN, .revents = 0 };
+    if (poll(&cpfd, 1, 1000) <= 0) {
+        /* No message arrived within 1s — close and never block. */
+        free(frame);
+        close(client_fd);
+        return;
+    }
+
     ssize_t n = recv(client_fd, frame, buf_size, 0);
     if (n >= (ssize_t)sizeof(struct playos_ipc_frame)) {
         if (frame->magic == PLAYOS_IPC_MAGIC

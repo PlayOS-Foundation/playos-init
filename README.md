@@ -14,6 +14,32 @@
 - Launches games and other child processes requested by the shell over IPC
 - Reaps child processes and handles recovery / shutdown flows
 
+## Direct Process Interactions
+
+`playos-init` owns a single global `struct playos_init_state` and coordinates every child through a single supervision loop. Each child is `fork()`ed, then in the child: `setsid()`, environment is set, stdout/stderr are redirected to a per-process log on `/data/log`, then `execl()`. The parent tracks the PID and reaps exits via `SIGCHLD` + `waitpid(-1, WNOHANG)`.
+
+### Supervised processes
+
+| Process | Spawn path | stderr log | Restart policy |
+|---|---|---|---|
+| Compositor (`/usr/bin/playos-compositor`) | `playos_supervisor_spawn_compositor` | `compositor-stderr.log` | 3×/60s → recovery mode |
+| Shell (`/usr/bin/playos-shell`) | `playos_supervisor_spawn_shell` | `shell-stderr.log` | 5×/30s → kept running without shell |
+| Game (`/data/games/<id>/<executable>`) | `playos_supervisor_spawn_game` | `game-<id>-stderr.log` | none (single game at a time) |
+| IPC self-test (`ipc-test-client`) | `main()` first loop | console | none |
+
+Environment passed to children: the compositor receives `XDG_RUNTIME_DIR=/run/playos`, `WAYLAND_DISPLAY=wayland-0`, and `PLAYOS_BACKEND=drm`; the shell receives the first two.
+
+### Inter-process channels
+
+1. **Control socket — `/run/playos/control.sock`** (`SOCK_SEQPACKET`, mode `0660`, `root:playos-trusted` GID 1000). The shell and any trusted process send framed requests; peers are authenticated via `SO_PEERCRED`. Handled message types: `QueryStatus`, `Shutdown`, `Reboot`, `LaunchGame`, `TerminateGame`, `ShellReady`, `FactoryReset`. Wire format is a `"PLOS"` magic + little-endian length + JSON body.
+2. **Lifecycle pipe** — a `pipe()` created per game. The write end stays in init; the read end is inherited by the game through the `PLAYOS_LIFECYCLE_FD` environment variable. Single-byte events: `FOREGROUND`, `BACKGROUND`, `SUSPEND`, `RESUME`, `TERMINATE`.
+3. **Compositor readiness** — a polled sentinel file `/run/playos/compositor-ready` (5s timeout, then startup proceeds anyway).
+
+### Signals
+
+- `SIGTERM` (graceful) then `SIGKILL` (force) are sent to games and the compositor on termination/shutdown.
+- Recovery kills the remaining process group with `kill(-1, SIGTERM/SIGKILL)` before halting.
+
 ## Repository layout
 
 - `src/` — init, mount, logging, supervisor, recovery, shutdown, and IPC handling logic

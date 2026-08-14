@@ -51,16 +51,15 @@ extern "C" {
 
 /* ── Lifecycle event constants ─────────────────────────────── */
 
-/** Normal foreground operation. */
-#define PLAYOS_LIFECYCLE_FOREGROUND 0x01U
-/** Game moved to background (e.g. overlay shown). */
-#define PLAYOS_LIFECYCLE_BACKGROUND 0x02U
-/** Game suspended (e.g. system sleep / GPU lost). */
-#define PLAYOS_LIFECYCLE_SUSPEND    0x03U
-/** Game resumed from suspend. */
-#define PLAYOS_LIFECYCLE_RESUME     0x04U
-/** Game must save state and exit. */
-#define PLAYOS_LIFECYCLE_TERMINATE  0x05U
+/* These byte values MUST match the PlayOSLifecycleEvent enum in
+ * playos/playos_lifecycle.h (FOREGROUND=0 … TERMINATE=4) so the single
+ * byte written by playos_lifecycle_send_event() maps directly onto the
+ * game-side enum. */
+#define PLAYOS_LIFECYCLE_FOREGROUND 0x00U
+#define PLAYOS_LIFECYCLE_BACKGROUND 0x01U
+#define PLAYOS_LIFECYCLE_SUSPEND    0x02U
+#define PLAYOS_LIFECYCLE_RESUME     0x03U
+#define PLAYOS_LIFECYCLE_TERMINATE  0x04U
 
 /* ── Wire-format structs ───────────────────────────────────── */
 

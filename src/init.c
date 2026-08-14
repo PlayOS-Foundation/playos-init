@@ -19,6 +19,7 @@ void playos_init_state_init(struct playos_init_state *s)
     s->compositor_state = COMPOSITOR_NOT_STARTED;
     s->game_pid = 0;
     s->game_state = GAME_NONE;
+    s->lifecycle_write_fd = -1;
     s->control_sock_fd = -1;
     s->compositor_sock_fd = -1;
     s->log_fd = -1;

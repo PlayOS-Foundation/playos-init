@@ -19,6 +19,7 @@
 #include "playos-init/init.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/mount.h"
+#include "ipc.h"
 
 /* ── External logging ────────────────────────────────────────────── */
 
@@ -484,8 +485,25 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
 
     playos_log_write(s, "sup", "spawning game: %s (%s)", game_id, exe_path);
 
+    /* Lifecycle pipe: init writes single-byte lifecycle events; the game
+     * inherits the read end via the PLAYOS_LIFECYCLE_FD environment
+     * variable (see playos_lifecycle.c in libplayos). Non-fatal on
+     * failure — the game simply runs without lifecycle events. */
+    int lifecycle_read_fd = -1;
+    int lifecycle_write_fd = -1;
+    if (playos_lifecycle_create(&lifecycle_read_fd, &lifecycle_write_fd) != 0) {
+        playos_log_write(s, "sup", "lifecycle pipe create failed: %s",
+                         strerror(errno));
+        lifecycle_read_fd = -1;
+        lifecycle_write_fd = -1;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
+        if (lifecycle_read_fd >= 0)
+            close(lifecycle_read_fd);
+        if (lifecycle_write_fd >= 0)
+            close(lifecycle_write_fd);
         playos_log_write(s, "sup", "game fork failed: %s", strerror(errno));
         return -1;
     }
@@ -493,6 +511,23 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
     if (pid == 0) {
         /* Child: run the actual game binary. */
         setsid();
+
+        /* Games render through the Wayland compositor exactly like the
+         * shell: they must inherit XDG_RUNTIME_DIR and WAYLAND_DISPLAY so
+         * raylib's PLATFORM_PLAYOS backend can connect to the compositor
+         * socket. Without these the game's InitWindow() fails and the
+         * process exits before drawing a single frame. */
+        setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
+        setenv("WAYLAND_DISPLAY", "wayland-0", 1);
+
+        /* Hand the read end of the lifecycle pipe to the game. */
+        if (lifecycle_read_fd >= 0) {
+            char fd_str[16];
+            snprintf(fd_str, sizeof(fd_str), "%d", lifecycle_read_fd);
+            setenv("PLAYOS_LIFECYCLE_FD", fd_str, 1);
+        }
+        if (lifecycle_write_fd >= 0)
+            close(lifecycle_write_fd);
 
         /* Persist the game's stdout/stderr to the data partition so a
          * crash, assertion, or loader error is visible on the USB. */
@@ -515,6 +550,10 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
     }
 
     /* Parent */
+    if (lifecycle_read_fd >= 0)
+        close(lifecycle_read_fd);
+    s->lifecycle_write_fd = lifecycle_write_fd;
+
     s->game_pid = pid;
     s->game_state = GAME_RUNNING;
     strncpy(s->game_id, game_id, sizeof(s->game_id) - 1);
@@ -540,7 +579,11 @@ int playos_supervisor_terminate_game(struct playos_init_state *s, int force)
         /* Immediate kill */
         kill(s->game_pid, SIGKILL);
     } else {
-        /* Graceful: SIGTERM first, then SIGKILL after timeout */
+        /* Graceful: signal the game to save state and exit, then
+         * SIGTERM as a fallback for games not reading the pipe. */
+        if (s->lifecycle_write_fd >= 0)
+            playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                        PLAYOS_LIFECYCLE_TERMINATE);
         kill(s->game_pid, SIGTERM);
 
         /* TODO S1-T6: Add timeout escalation via timer/alarm
@@ -558,6 +601,11 @@ void playos_supervisor_game_exited(struct playos_init_state *s,
     playos_log_write(s, "sup",
                      "game %s PID %d exited: code=%d signal=%d",
                      s->game_id, s->game_pid, exit_code, signal_num);
+
+    if (s->lifecycle_write_fd >= 0) {
+        close(s->lifecycle_write_fd);
+        s->lifecycle_write_fd = -1;
+    }
 
     s->game_pid = 0;
     s->game_id[0] = '\0';

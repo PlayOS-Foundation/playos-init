@@ -85,6 +85,7 @@ struct playos_init_state {
     enum playos_game_state game_state;
     char                game_id[256];
     char                launch_token[64];
+    int                 lifecycle_write_fd;   /* write end of game lifecycle pipe */
 
     /* IPC */
     int control_sock_fd;
