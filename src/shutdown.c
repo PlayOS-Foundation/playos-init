@@ -19,6 +19,7 @@
 #include <sys/reboot.h>
 
 #include "playos-init/init.h"
+#include "playos-init/shutdown.h"
 
 /* ── External logging ────────────────────────────────────────────── */
 

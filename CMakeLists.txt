@@ -39,6 +39,7 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/mount.h
     include/playos-init/supervisor.h
     include/playos-init/recovery.h
+    include/playos-init/shutdown.h
 )
 
 # ── Executable ──────────────────────────────────────────────────────

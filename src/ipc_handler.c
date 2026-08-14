@@ -24,6 +24,7 @@
 #include <limits.h>
 
 #include "playos-init/init.h"
+#include "playos-init/shutdown.h"
 
 /* ── External dependencies ───────────────────────────────────────── */
 
@@ -219,8 +220,8 @@ static int handle_message(struct playos_init_state *s, int client_fd,
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_SHUTDOWN) == 0) {
         playos_log_write(s, "ipc", "shutdown requested via IPC");
         playos_ipc_message_free(&msg);
-        /* Signal main loop to shut down */
-        s->recovery_mode = 1;
+        /* Orderly power-off (never returns). */
+        playos_shutdown(s, 0);
         return 0;
     }
 
@@ -244,10 +245,8 @@ static int handle_message(struct playos_init_state *s, int client_fd,
 
         playos_ipc_message_free(&msg);
 
-        /* Orderly reboot */
-        sync();
-        extern void playos_shutdown(int reboot_after);
-        playos_shutdown(1);
+        /* Orderly reboot (never returns). */
+        playos_shutdown(s, 1);
         return -1;
     }
 
