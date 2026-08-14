@@ -145,7 +145,7 @@ static int test_launch_game(int fd)
 {
     printf("TEST: LaunchGame...\n");
 
-    const char *extra = "\"game_id\":\"test-game-1\",\"manifest_path\":\"/data/games/test-game-1/manifest.json\"";
+    const char *extra = "\"game_id\":\"com.playos.sample-rotating-squares\",\"manifest_path\":\"/data/games/com.playos.sample-rotating-squares/manifest.json\"";
     if (send_message(fd, PLAYOS_IPC_TYPE_LAUNCH_GAME, extra) != 0)
         return -1;
 
@@ -206,7 +206,7 @@ static int test_terminate_game(int fd)
 {
     printf("TEST: TerminateGame...\n");
 
-    const char *extra = "\"game_id\":\"test-game-1\"";
+    const char *extra = "\"game_id\":\"com.playos.sample-rotating-squares\"";
     if (send_message(fd, PLAYOS_IPC_TYPE_TERMINATE_GAME, extra) != 0)
         return -1;
 
