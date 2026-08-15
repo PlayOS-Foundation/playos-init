@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -261,17 +262,19 @@ static void dbg_dump_kmsg(void)
     dbg_write("\n");
 }
 
-/* ── Public entry point ──────────────────────────────────────────── */
+/* ── Public entry points ─────────────────────────────────────────── */
 
-void playos_audio_debug_dump(void)
+static void playos_audio_debug_dump_impl(const char *marker, bool append)
 {
-    dbg_fd = open(AUDIO_DEBUG_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+
+    dbg_fd = open(AUDIO_DEBUG_PATH, flags, 0644);
     if (dbg_fd < 0)
         return; /* not fatal — diagnostics are optional */
 
     dbg_total = 0;
 
-    dbg_write("playos audio diagnostics\n");
+    dbg_write("%s\n", marker);
     dbg_write("=======================\n\n");
 
     dbg_dump_alsa();
@@ -281,4 +284,19 @@ void playos_audio_debug_dump(void)
     fsync(dbg_fd);
     close(dbg_fd);
     dbg_fd = -1;
+}
+
+void playos_audio_debug_dump(void)
+{
+    playos_audio_debug_dump_impl("playos audio diagnostics", false);
+}
+
+/* The internal Realtek/CS35L41 speaker card (card 1) registers a few seconds
+ * after boot, after the early snapshot above. This append-only variant runs
+ * later from the PID 1 supervision loop so the ALSA topology section also
+ * captures the speaker card. */
+void playos_audio_debug_dump_late(void)
+{
+    playos_audio_debug_dump_impl(
+        "playos audio diagnostics (late snapshot)", true);
 }

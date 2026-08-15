@@ -36,6 +36,7 @@ void playos_log_write(struct playos_init_state *s, const char *tag,
                       const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 void playos_audio_debug_dump(void);
+void playos_audio_debug_dump_late(void);
 
 /* ── Boot banner ─────────────────────────────────────────────────── */
 
@@ -168,6 +169,17 @@ int main(void)
 
         /* 1 Hz thermal monitor + EPP profile enforcement (Sprint 9) */
         playos_thermal_tick(s);
+
+        /* One-shot late audio snapshot ~5s into the loop. The Realtek/
+         * CS35L41 speaker card (card 1) registers a few seconds after boot,
+         * after the early snapshot in Stage 2; this append-only re-dump makes
+         * the ALSA topology section actually include the speaker card. */
+        static int late_audio_ticks = 0;
+        if (late_audio_ticks < 5) {
+            late_audio_ticks++;
+            if (late_audio_ticks == 5)
+                playos_audio_debug_dump_late();
+        }
 
         /*
          * Check recovery flag set by IPC handler or supervisor
