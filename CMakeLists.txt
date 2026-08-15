@@ -26,6 +26,7 @@ set(PLAYOS_INIT_SOURCES
     src/shutdown.c
     src/ipc_handler.c
     src/audio_debug.c
+    src/thermal.c
     # IPC framing from playos-runtime (bundled copy)
     ipc/ipc_framing.c
     ipc/ipc_server.c
@@ -38,6 +39,7 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/mount.h
     include/playos-init/supervisor.h
     include/playos-init/shutdown.h
+    include/playos-init/thermal.h
 )
 
 # ── Executable ──────────────────────────────────────────────────────

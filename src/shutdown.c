@@ -21,6 +21,9 @@
 #include "playos-init/init.h"
 #include "playos-init/shutdown.h"
 
+/* IPC framing/type constants (bundled from playos-runtime) */
+#include "ipc.h"
+
 /* ── External logging ────────────────────────────────────────────── */
 
 void playos_log_write(struct playos_init_state *s, const char *tag,
@@ -111,4 +114,46 @@ void playos_shutdown(struct playos_init_state *s, int restart)
 
     /* Should never reach here */
     for (;;) pause();
+}
+
+/* ── Suspend/resume (Sprint 9) ──────────────────────────────────── */
+
+void playos_suspend(struct playos_init_state *s)
+{
+    int has_game = (s->lifecycle_write_fd >= 0 && s->game_pid > 0);
+
+    playos_log_write(s, "shutdown", "suspend requested");
+
+    /* Tell the active game it is losing CPU time. */
+    if (has_game) {
+        if (playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                        PLAYOS_LIFECYCLE_SUSPEND) != 0) {
+            playos_log_write(s, "shutdown",
+                             "failed to deliver SUSPEND to game");
+        }
+    }
+
+    FILE *f = NULL;
+    if (access("/sys/power/state", W_OK) == 0)
+        f = fopen("/sys/power/state", "w");
+
+    if (!f) {
+        playos_log_write(s, "shutdown",
+                         "suspend unavailable (/sys/power/state)");
+    } else {
+        playos_log_write(s, "shutdown", "entering S3 suspend");
+        if (fputs("mem\n", f) < 0)
+            playos_log_write(s, "shutdown", "suspend write failed");
+        fclose(f);
+        playos_log_write(s, "shutdown", "system resumed");
+    }
+
+    /* Resume (or immediate un-suspend) — never leave the game stuck. */
+    if (has_game) {
+        if (playos_lifecycle_send_event(s->lifecycle_write_fd,
+                                        PLAYOS_LIFECYCLE_RESUME) != 0) {
+            playos_log_write(s, "shutdown",
+                             "failed to deliver RESUME to game");
+        }
+    }
 }

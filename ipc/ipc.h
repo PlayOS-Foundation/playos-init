@@ -60,6 +60,14 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_GAME_SURFACE_READY   "GameSurfaceReady"
 #define PLAYOS_IPC_TYPE_COMPOSITOR_STATE_CHANGED "CompositorStateChanged"
 
+/* ── Power / thermal (Sprint 9) ─────────────────────────────── */
+/* game/overlay → init */
+#define PLAYOS_IPC_TYPE_SET_PERF_PROFILE       "SetPerfProfile"
+#define PLAYOS_IPC_TYPE_SUSPEND                "Suspend"
+/* init → shell (async events) */
+#define PLAYOS_IPC_TYPE_THERMAL_STATE_CHANGED  "ThermalStateChanged"
+#define PLAYOS_IPC_TYPE_PERF_PROFILE_CHANGED   "PerfProfileChanged"
+
 /* ── Lifecycle event constants ─────────────────────────────── */
 
 /* These byte values MUST match the PlayOSLifecycleEvent enum in

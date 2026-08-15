@@ -102,6 +102,13 @@ struct playos_init_state {
     int                 game_stopped;         /* SIGSTOP sent to game (Sprint 7) */
     long long           bg_since_ms;          /* monotonic ms when BACKGROUND was delivered */
 
+    /* Power / thermal (Sprint 9) */
+    int                 active_profile;       /* PLAYOS_PERF_PROFILE_* */
+    int                 thermal_state;        /* PLAYOS_THERMAL_STATE_* */
+    long long           thermal_critical_since_ms; /* monotonic ms when CRITICAL began */
+    int                 thermal_initialized;  /* thermal.json loaded + EPP synced */
+    int                 suspend_pending;      /* overlay requested system suspend */
+
     /* IPC */
     int control_sock_fd;
     int compositor_sock_fd;

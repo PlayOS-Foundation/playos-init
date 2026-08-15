@@ -26,6 +26,7 @@
 #include "playos-init/init.h"
 #include "playos-init/shutdown.h"
 #include "playos-init/supervisor.h"
+#include "playos-init/thermal.h"
 #include "playos-init/ipc_handler.h"
 
 /* ── External dependencies ───────────────────────────────────────── */
@@ -577,6 +578,70 @@ static int handle_message(struct playos_init_state *s, int client_fd,
 
         playos_log_write(s, "ipc", "FactoryReset complete");
         playos_ipc_message_free(&msg);
+        return 0;
+    }
+
+    /* ── SetPerfProfile (Sprint 9) ──────────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_SET_PERF_PROFILE) == 0) {
+        char profile_str[64] = {0};
+        int prof = PLAYOS_PERF_PROFILE_BALANCED;
+
+        if (json_string_field(msg.json_raw, "profile", profile_str,
+                              sizeof(profile_str)) >= 0) {
+            if (strcmp(profile_str, "power_save") == 0)
+                prof = PLAYOS_PERF_PROFILE_POWER_SAVE;
+            else if (strcmp(profile_str, "performance") == 0)
+                prof = PLAYOS_PERF_PROFILE_PERFORMANCE;
+            else if (strcmp(profile_str, "balanced") == 0)
+                prof = PLAYOS_PERF_PROFILE_BALANCED;
+        }
+
+        int rc = playos_thermal_request_profile(s, prof);
+        int ok = (rc == PLAYOS_THERMAL_REQ_OK);
+        const char *reason = "invalid_profile";
+        if (rc == PLAYOS_THERMAL_REQ_DENIED)
+            reason = "thermal_denied";
+        else if (rc == PLAYOS_THERMAL_REQ_EPP_FAIL)
+            reason = "epp_write_failed";
+
+        char reply_json[256];
+        int reply_len;
+        if (ok) {
+            reply_len = snprintf(reply_json, sizeof(reply_json),
+                "{\"v\":%d,\"type\":\"%s\",\"accepted\":true}",
+                PLAYOS_IPC_PROTOCOL_VERSION,
+                PLAYOS_IPC_TYPE_SET_PERF_PROFILE);
+        } else {
+            reply_len = snprintf(reply_json, sizeof(reply_json),
+                "{\"v\":%d,\"type\":\"%s\",\"accepted\":false,"
+                "\"reason\":\"%s\"}",
+                PLAYOS_IPC_PROTOCOL_VERSION,
+                PLAYOS_IPC_TYPE_SET_PERF_PROFILE, reason);
+        }
+
+        if (reply_len > 0 && (size_t)reply_len < sizeof(reply_json)) {
+            struct playos_ipc_frame *frame =
+                malloc(sizeof(*frame) + (size_t)reply_len);
+            if (frame) {
+                frame->magic = PLAYOS_IPC_MAGIC;
+                frame->length = (uint32_t)reply_len;
+                memcpy(frame->body, reply_json, (size_t)reply_len);
+                (void)!write(client_fd, frame,
+                             sizeof(*frame) + (size_t)reply_len);
+                free(frame);
+            }
+        }
+
+        playos_ipc_message_free(&msg);
+        return 0;
+    }
+
+    /* ── Suspend (Sprint 9) ─────────────────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_SUSPEND) == 0) {
+        playos_log_write(s, "ipc", "suspend requested via IPC");
+        playos_ipc_message_free(&msg);
+        /* Best-effort S3 suspend; never returns with the game stuck. */
+        playos_suspend(s);
         return 0;
     }
 

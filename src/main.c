@@ -23,6 +23,7 @@
 #include "playos-init/mount.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/ipc_handler.h"
+#include "playos-init/thermal.h"
 
 /* ── Global state ────────────────────────────────────────────────── */
 
@@ -107,6 +108,9 @@ int main(void)
     playos_log_write(s, "init",
                      "compositor control server started on /run/playos/compositor.sock");
 
+    /* Stage 3b: Thermal thresholds + EPP profile sync (Sprint 9) */
+    playos_thermal_init(s);
+
     /* Stage 4: Spawn compositor */
     playos_boot_stage_write(BOOT_STAGE_COMPOSITOR);
     if (playos_supervisor_spawn_compositor(s) != 0) {
@@ -161,6 +165,9 @@ int main(void)
 
         /* Non-cooperative game SIGSTOP fallback (Sprint 7) */
         playos_supervisor_lifecycle_tick(s);
+
+        /* 1 Hz thermal monitor + EPP profile enforcement (Sprint 9) */
+        playos_thermal_tick(s);
 
         /*
          * Check recovery flag set by IPC handler or supervisor
