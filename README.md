@@ -91,6 +91,88 @@ This repository includes small test helpers used for validation and integration 
 - `playos-game-stub`
 - `ipc-test-client`
 
+## Architecture diagrams
+
+### Process and channel map
+
+```mermaid
+flowchart LR
+    I["playos-init<br/>(PID 1)"]
+
+    C["playos-compositor<br/>/usr/bin/playos-compositor"]
+    SH["playos-shell<br/>/usr/bin/playos-shell"]
+    O["playos-overlay<br/>/usr/bin/playos-overlay"]
+    G["game<br/>/data/games/&lt;id&gt;/&lt;exe&gt;"]
+
+    I -- "fork/exec + Wayland env" --> C
+    I -- "fork/exec + Wayland env" --> SH
+    I -- "fork/exec + Wayland env" --> O
+    I -- "fork/exec + env + lifecycle pipe" --> G
+
+    I -. "SIGTERM / SIGKILL" .-> C
+    I -. "SIGTERM / SIGKILL" .-> G
+    I -. "SIGSTOP / SIGCONT fallback" .-> G
+
+    C -- "creates" --> R["/run/playos/compositor-ready"]
+    I -- "polls readiness (5s)" --> R
+
+    SH -- "ShellReady / QueryStatus / LaunchGame / TerminateGame / Shutdown / Reboot / FactoryReset / SetPerfProfile / Suspend<br/>over /run/playos/control.sock" --> I
+    I -- "async events (StatusReport, ACKs, GameStarted/Exited/Crashed, ThermalStateChanged, PerfProfileChanged)<br/>over the shell's persistent control.sock connection" --> SH
+
+    I -- "SetExpectedGame / ShowOverlay / HideOverlay / ClearExpectedGame / ForceTerminateGame<br/>over /run/playos/compositor.sock" --> C
+    C -- "GameSurfaceReady / CompositorStateChanged<br/>over /run/playos/compositor.sock" --> I
+```
+
+### Runtime message flow
+
+```mermaid
+sequenceDiagram
+    participant S as playos-shell
+    participant I as playos-init (PID 1)
+    participant C as playos-compositor
+    participant G as game process
+
+    S->>I: ShellReady (control.sock)
+    Note over I: keep this fd as persistent async listener
+
+    S->>I: QueryStatus
+    I-->>S: StatusReport (uptime, pids, boot_stage, recovery)
+
+    S->>I: LaunchGame {game_id, manifest_path}
+    I->>I: read manifest, validate api_version
+    I->>C: SetExpectedGame {launch_token, game_id}
+    I->>G: fork/exec + env + lifecycle pipe, send FOREGROUND
+    I-->>S: LaunchGameAck {game_id, pid, launch_token}
+    I-->>S: GameStarted {game_id, pid, launch_token}
+
+    C->>I: CompositorStateChanged {state}
+    alt overlay over game
+        I->>G: lifecycle BACKGROUND
+        I->>G: SIGSTOP after 500ms if non-cooperative
+    else game foregrounded
+        I->>G: SIGCONT + lifecycle FOREGROUND
+    end
+
+    G--xI: exits (kernel delivers SIGCHLD)
+    I-->>S: GameExited | GameCrashed
+
+    S->>I: TerminateGame
+    I->>G: lifecycle TERMINATE + SIGTERM
+    I-->>S: TerminateGameAck
+
+    S->>I: Shutdown | Reboot
+    I->>C: SIGTERM
+    I->>G: SIGTERM
+    I->>I: sync + reboot/halt
+```
+
+### Channel summary
+
+- **`/run/playos/control.sock`** — trusted request/response socket (`SOCK_SEQPACKET`, mode `0660`, `root:playos-trusted`, auth via `SO_PEERCRED`). Shell and other trusted clients send framed `PLOS`-magic JSON messages; init replies or pushes async events.
+- **`/run/playos/compositor.sock`** — single compositor control connection. Init sends game/overlay coordination messages; compositor reports surface state back.
+- **Lifecycle pipe** — one `pipe()` per game. Init keeps the write end; the game inherits the read end via `PLAYOS_LIFECYCLE_FD`. Single-byte events: `FOREGROUND`, `BACKGROUND`, `SUSPEND`, `RESUME`, `TERMINATE`.
+- **Signals + readiness file** — init supervises children via `SIGCHLD`/`waitpid`, escalates with `SIGTERM`/`SIGKILL`, and uses `SIGSTOP`/`SIGCONT` as the non-cooperative background fallback. Compositor readiness is the polled `/run/playos/compositor-ready` file.
+
 ## License
 
 Add licensing information here if/when it becomes available.
