@@ -535,31 +535,35 @@ static int handle_message(struct playos_init_state *s, int client_fd,
             }
         }
 
-        /* erase_games/erase_saves/erase_logs are deferred to Sprint 10;
-         * report them explicitly rather than acting on them. */
-        char deferred_json[128] = "";
-        if (erase_games || erase_saves || erase_logs) {
-            char items[96] = "";
-            size_t off = 0;
-            if (erase_games)
-                off += (size_t)snprintf(items + off, sizeof(items) - off,
-                                        "%s\"games\"", off ? "," : "");
-            if (erase_saves)
-                off += (size_t)snprintf(items + off, sizeof(items) - off,
-                                        "%s\"saves\"", off ? "," : "");
-            if (erase_logs)
-                off += (size_t)snprintf(items + off, sizeof(items) - off,
-                                        "%s\"logs\"", off ? "," : "");
-            snprintf(deferred_json, sizeof(deferred_json),
-                     ",\"deferred\":[%s]", items);
+        /* Sprint 10: act on games/saves/logs. Each rmtree() recreates the
+         * top-level directory empty, so a valid /data tree is preserved. */
+        if (erase_games) {
+            playos_log_write(s, "ipc", "FactoryReset: erasing /data/games");
+            if (rmtree("/data/games") != 0) {
+                playos_log_write(s, "ipc",
+                                 "FactoryReset: failed to reset /data/games");
+            }
+        }
+        if (erase_saves) {
+            playos_log_write(s, "ipc", "FactoryReset: erasing /data/saves");
+            if (rmtree("/data/saves") != 0) {
+                playos_log_write(s, "ipc",
+                                 "FactoryReset: failed to reset /data/saves");
+            }
+        }
+        if (erase_logs) {
+            playos_log_write(s, "ipc", "FactoryReset: erasing /data/log");
+            if (rmtree("/data/log") != 0) {
+                playos_log_write(s, "ipc",
+                                 "FactoryReset: failed to reset /data/log");
+            }
         }
 
-        char done_json[512];
+        char done_json[128];
         int done_len = snprintf(done_json, sizeof(done_json),
-            "{\"v\":%d,\"type\":\"%s\"%s}",
+            "{\"v\":%d,\"type\":\"%s\"}",
             PLAYOS_IPC_PROTOCOL_VERSION,
-            PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE,
-            deferred_json);
+            PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE);
         if (done_len < 0 || (size_t)done_len >= sizeof(done_json)) {
             playos_ipc_message_free(&msg);
             return -1;

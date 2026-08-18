@@ -418,6 +418,42 @@ static int find_data_partition(char *device_path, size_t path_size)
     return -1;
 }
 
+/* ── Kernel command line flags (Sprint 10 installer trigger) ─────── */
+
+/* Read /proc/cmdline and test whether `flag` is one of its
+ * whitespace-delimited tokens. A token matches only when it is
+ * byte-for-byte equal to `flag` (so "playos.mode=install" never matches
+ * a longer "playos.mode=installer" token). */
+int playos_cmdline_has_flag(const char *flag)
+{
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    if (!cmdline)
+        return 0;
+
+    char buf[4096] = {0};
+    int found = 0;
+
+    if (fgets(buf, sizeof(buf), cmdline)) {
+        char *save = NULL;
+        char *tok = strtok_r(buf, " \t\r\n", &save);
+        while (tok != NULL) {
+            if (strcmp(tok, flag) == 0) {
+                found = 1;
+                break;
+            }
+            tok = strtok_r(NULL, " \t\r\n", &save);
+        }
+    }
+
+    fclose(cmdline);
+    return found;
+}
+
+int playos_install_mode_requested(void)
+{
+    return playos_cmdline_has_flag("playos.mode=install");
+}
+
 /* ── Boot marker (diagnostic) ────────────────────────────────────── */
 
 /* Write playos-boot.txt to EVERY playos-data partition found, naming

@@ -45,6 +45,7 @@ static void compositor_restart(struct playos_init_state *s);
 static int compositor_should_restart(struct playos_init_state *s);
 static void spawn_shell(struct playos_init_state *s);
 static void spawn_overlay(struct playos_init_state *s);
+static void spawn_installer(struct playos_init_state *s);
 
 /* ── Persistent child logging ────────────────────────────────────── */
 
@@ -146,6 +147,17 @@ void playos_supervisor_reap_children(struct playos_init_state *s)
                 signal_num = WTERMSIG(wstatus);
 
             playos_supervisor_overlay_exited(s, exit_code, signal_num);
+        } else if (pid == s->installer_pid) {
+            /* Installer exited (Sprint 10) */
+            int exit_code = -1;
+            int signal_num = 0;
+
+            if (WIFEXITED(wstatus))
+                exit_code = WEXITSTATUS(wstatus);
+            if (WIFSIGNALED(wstatus))
+                signal_num = WTERMSIG(wstatus);
+
+            playos_supervisor_installer_exited(s, exit_code, signal_num);
         } else {
             /* Unknown child — log and move on */
             playos_log_write(s, "sup", "reaped unknown child PID %d", pid);
@@ -459,6 +471,97 @@ void playos_supervisor_overlay_exited(struct playos_init_state *s,
 void playos_supervisor_spawn_overlay(struct playos_init_state *s)
 {
 	spawn_overlay(s);
+}
+
+/* ── Installer supervision (Sprint 10) ───────────────────────────── */
+
+static void spawn_installer(struct playos_init_state *s)
+{
+	const char *path = "/usr/bin/playos-installer";
+
+	playos_log_write(s, "sup", "spawning installer: %s", path);
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		playos_log_write(s, "sup", "installer fork failed: %s",
+		                 strerror(errno));
+		return;
+	}
+
+	if (pid == 0) {
+		/* Child: same Wayland env as compositor */
+		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
+		setenv("WAYLAND_DISPLAY", "playos-0", 1);
+
+		/* /data may not exist on an installer boot; redirect only when
+		 * the persistent log directory is actually available. */
+		child_log_redirect("/data/log/installer-stderr.log");
+
+		execl(path, path, NULL);
+
+		dprintf(STDERR_FILENO,
+		        "playos-init: installer exec failed: %s\n",
+		        strerror(errno));
+		_exit(127);
+	}
+
+	/* Parent: track as child */
+	s->installer_pid = pid;
+	playos_log_write(s, "sup", "installer launched (PID %d)", pid);
+}
+
+static int installer_should_restart(struct playos_init_state *s)
+{
+	time_t now = time(NULL);
+	struct playos_restart_info *r = &s->installer_restarts;
+
+	if (now - r->window_start > PLAYOS_INSTALLER_WINDOW_S) {
+		r->count = 0;
+		r->window_start = now;
+	}
+
+	r->count++;
+	return (r->count <= PLAYOS_INSTALLER_MAX_RESTARTS);
+}
+
+static void installer_restart(struct playos_init_state *s)
+{
+	playos_log_write(s, "sup",
+	                 "restarting installer in %d ms (attempt %d)",
+	                 PLAYOS_INSTALLER_RESTART_DELAY_MS,
+	                 s->installer_restarts.count);
+
+	usleep(PLAYOS_INSTALLER_RESTART_DELAY_MS * 1000);
+
+	spawn_installer(s);
+}
+
+void playos_supervisor_installer_exited(struct playos_init_state *s,
+                                        int exit_code, int signal_num)
+{
+	s->installer_restarts.last_exit_code = exit_code;
+	s->installer_restarts.last_signal = signal_num;
+
+	playos_log_write(s, "sup",
+	                 "installer PID %d exited: code=%d signal=%d",
+	                 s->installer_pid, exit_code, signal_num);
+
+	s->installer_pid = 0;
+
+	if (installer_should_restart(s)) {
+		installer_restart(s);
+	} else {
+		playos_log_write(s, "sup",
+		                 "installer restart limit exceeded (%d restarts in %ds) — "
+		                 "leaving compositor running without installer",
+		                 PLAYOS_INSTALLER_MAX_RESTARTS,
+		                 PLAYOS_INSTALLER_WINDOW_S);
+	}
+}
+
+void playos_supervisor_spawn_installer(struct playos_init_state *s)
+{
+	spawn_installer(s);
 }
 
 /* ── Game manifest helpers ──────────────────────────────────────── */

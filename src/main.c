@@ -76,14 +76,27 @@ int main(void)
     playos_log_init(s);
     playos_log_write(s, "init", "playos-init starting as PID %d", getpid());
 
+    /* Sprint 10: detect installer boot before data-mount policy decisions. */
+    s->install_mode = playos_install_mode_requested();
+    if (s->install_mode)
+        playos_log_write(s, "init", "installer mode: playos.mode=install present");
+
     /* Set up SIGCHLD handler for zombie reaping */
     playos_supervisor_init_signal_handler();
 
     /* Stage 2: Discover and mount data partition */
     playos_boot_stage_write(BOOT_STAGE_DATA_DISCOVERY);
     if (playos_mount_data(s) != 0) {
-        playos_log_write(s, "init", "WARN: data partition not found — provisioning halt");
-        playos_enter_recovery(s, "data partition not found");
+        if (s->install_mode) {
+            /* Installer runs entirely from the removable boot medium; the
+             * target disk's data partition does not exist yet, so /data is
+             * optional here. */
+            playos_log_write(s, "init",
+                             "installer mode: data partition optional — continuing");
+        } else {
+            playos_log_write(s, "init", "WARN: data partition not found — provisioning halt");
+            playos_enter_recovery(s, "data partition not found");
+        }
     } else {
         playos_boot_stage_write(BOOT_STAGE_DATA_MOUNTED);
         if (playos_data_create_dirs() != 0) {
@@ -117,16 +130,26 @@ int main(void)
     if (playos_supervisor_spawn_compositor(s) != 0) {
         playos_log_write(s, "init", "WARN: compositor spawn failed");
     } else {
-        /* Compositor is running — launch visual test client */
+        /* Compositor is running — launch the appropriate Wayland client.
+         * In installer mode the installer takes the shell role (Sprint 10);
+         * otherwise the shell plus the trusted in-game overlay start. */
         usleep(500000); /* 500ms grace period for compositor to fully init */
-        playos_supervisor_spawn_shell(s);
-        playos_supervisor_spawn_overlay(s);
+        if (s->install_mode) {
+            playos_supervisor_spawn_installer(s);
+        } else {
+            playos_supervisor_spawn_shell(s);
+            playos_supervisor_spawn_overlay(s);
+        }
     }
 
     /* Stage 5: System ready */
     playos_boot_stage_write(BOOT_STAGE_READY);
     playos_log_write(s, "init", "system ready — entering supervision loop");
-    dprintf(STDERR_FILENO, "\n  PlayOS Sprint 6 — playos-shell on wlroots DRM/KMS\n");
+    if (s->install_mode) {
+        dprintf(STDERR_FILENO, "\n  PlayOS Sprint 10 — playos-installer on wlroots DRM/KMS\n");
+    } else {
+        dprintf(STDERR_FILENO, "\n  PlayOS Sprint 6 — playos-shell on wlroots DRM/KMS\n");
+    }
     dprintf(STDERR_FILENO, "  System ready.\n\n");
 
     /* Main supervision loop */
