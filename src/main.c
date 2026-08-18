@@ -15,12 +15,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/stat.h>
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
+#include "playos-init/boot_slot.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/ipc_handler.h"
 #include "playos-init/thermal.h"
@@ -83,6 +87,46 @@ int main(void)
 
     /* Set up SIGCHLD handler for zombie reaping */
     playos_supervisor_init_signal_handler();
+
+    /* Sprint 11: mount the EFI System Partition (rw) for A/B boot slot
+     * accounting. Best-effort — a missing or unmountable ESP never
+     * hard-fails boot; we simply skip slot accounting. */
+    {
+        char esp_dev[128] = {0};
+        if (playos_find_partition_by_label("ESP", esp_dev,
+                                           sizeof(esp_dev)) == 0) {
+            mkdir("/EFI", 0755);
+            int esp_ok = (mount(esp_dev, "/EFI", "vfat", 0, NULL) == 0);
+            if (!esp_ok)
+                esp_ok = (mount(esp_dev, "/EFI", "auto", 0, NULL) == 0);
+            if (esp_ok) {
+                s->efi_mounted = 1;
+                mkdir("/EFI/playos", 0755);
+                playos_log_write(s, "init",
+                                 "ESP mounted at /EFI (device %s)", esp_dev);
+            } else {
+                playos_log_write(s, "init",
+                                 "WARN: failed to mount ESP at /EFI: %s",
+                                 strerror(errno));
+            }
+        } else {
+            dprintf(STDERR_FILENO,
+                    "playos-init: WARN: no ESP partition found — "
+                    "skipping A/B boot slot accounting\n");
+        }
+
+        if (s->efi_mounted) {
+            struct boot_slot_state bs;
+            if (boot_slot_increment(PLAYOS_BOOT_JSON_PATH, &bs)) {
+                playos_log_write(s, "init",
+                                 "boot slot %c failed too many times — "
+                                 "rolling back", bs.active_slot);
+                boot_slot_rollback(PLAYOS_BOOT_JSON_PATH, &bs);
+                sync();
+                reboot(RB_AUTOBOOT);
+            }
+        }
+    }
 
     /* Stage 2: Discover and mount data partition */
     playos_boot_stage_write(BOOT_STAGE_DATA_DISCOVERY);
@@ -202,6 +246,16 @@ int main(void)
             late_audio_ticks++;
             if (late_audio_ticks == 5)
                 playos_audio_debug_dump_late();
+        }
+
+        /* Sprint 11: fallback healthy-boot gate ~60s into the loop. The
+         * ShellReady path marks the slot good as soon as the shell registers;
+         * this backstop covers a shell that never connects. Idempotent. */
+        static int boot_good_ticks = 0;
+        if (boot_good_ticks < 60) {
+            boot_good_ticks++;
+            if (boot_good_ticks == 60)
+                playos_boot_mark_good_once(s);
         }
 
         /*

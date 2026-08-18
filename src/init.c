@@ -36,4 +36,6 @@ void playos_init_state_init(struct playos_init_state *s)
     s->thermal_critical_since_ms = 0;
     s->thermal_initialized = 0;
     s->suspend_pending = 0;
+    s->efi_mounted = 0;
+    s->boot_slot_marked_good = 0;
 }

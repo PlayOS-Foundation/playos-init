@@ -68,6 +68,16 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_THERMAL_STATE_CHANGED  "ThermalStateChanged"
 #define PLAYOS_IPC_TYPE_PERF_PROFILE_CHANGED   "PerfProfileChanged"
 
+/* ── Updates (Sprint 11) ───────────────────────────────────── */
+/* shell → init */
+#define PLAYOS_IPC_TYPE_APPLY_UPDATE       "ApplyUpdate"
+#define PLAYOS_IPC_TYPE_APPLY_UPDATE_ACK   "ApplyUpdateAck"
+#define PLAYOS_IPC_TYPE_APPLY_UPDATE_ERROR "ApplyUpdateError"
+/* init → shell (async events) */
+#define PLAYOS_IPC_TYPE_UPDATE_PROGRESS    "UpdateProgress"
+#define PLAYOS_IPC_TYPE_UPDATE_COMPLETE    "UpdateComplete"
+#define PLAYOS_IPC_TYPE_UPDATE_ERROR       "UpdateError"
+
 /* ── Lifecycle event constants ─────────────────────────────── */
 
 /* These byte values MUST match the PlayOSLifecycleEvent enum in

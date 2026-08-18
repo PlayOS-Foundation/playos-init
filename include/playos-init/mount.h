@@ -26,4 +26,10 @@ int playos_cmdline_has_flag(const char *flag);
 /* True when booted with playos.mode=install (installer USB). */
 int playos_install_mode_requested(void);
 
+/* Locate a GPT partition by its UTF-16LE name label (e.g. "ESP",
+ * "playos-a"). Fills device_path with the /dev/ node and returns 0, or
+ * -1 if no such partition is found. */
+int playos_find_partition_by_label(const char *label, char *device_path,
+                                   size_t path_size);
+
 #endif /* PLAYOS_MOUNT_H */

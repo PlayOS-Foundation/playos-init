@@ -132,6 +132,10 @@ struct playos_init_state {
 
     /* Recovery */
     int recovery_mode;
+
+    /* A/B boot slots + updates (Sprint 11) */
+    int efi_mounted;           /* ESP mounted at /EFI (rw, for boot.json) */
+    int boot_slot_marked_good; /* one-shot healthy-boot gate */
 };
 
 /* ── Global state accessor ───────────────────────────────────────── */

@@ -27,6 +27,9 @@ set(PLAYOS_INIT_SOURCES
     src/ipc_handler.c
     src/audio_debug.c
     src/thermal.c
+    src/sha256.c
+    src/boot_slot.c
+    src/update.c
     # IPC framing from playos-runtime (bundled copy)
     ipc/ipc_framing.c
     ipc/ipc_server.c
@@ -40,6 +43,9 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/supervisor.h
     include/playos-init/shutdown.h
     include/playos-init/thermal.h
+    include/playos-init/boot_slot.h
+    include/playos-init/update.h
+    include/playos-init/sha256.h
 )
 
 # ── Executable ──────────────────────────────────────────────────────
@@ -109,4 +115,16 @@ if(BUILD_TESTS)
     target_include_directories(test_init_state PRIVATE include)
     target_compile_options(test_init_state PRIVATE -Wall -Wextra)
     add_test(NAME init_state COMMAND test_init_state)
+
+    # Boot slot + update verification test
+    add_executable(test_boot_slot
+        tests/host/test_boot_slot.c
+        src/boot_slot.c
+        src/update.c
+        src/sha256.c
+        src/mount.c
+    )
+    target_include_directories(test_boot_slot PRIVATE include)
+    target_compile_options(test_boot_slot PRIVATE -Wall -Wextra)
+    add_test(NAME boot_slot COMMAND test_boot_slot)
 endif()

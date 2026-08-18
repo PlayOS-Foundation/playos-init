@@ -27,6 +27,8 @@
 #include "playos-init/shutdown.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/thermal.h"
+#include "playos-init/boot_slot.h"
+#include "playos-init/update.h"
 #include "playos-init/ipc_handler.h"
 
 /* ── External dependencies ───────────────────────────────────────── */
@@ -477,6 +479,12 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         s->shell_listener_fd = client_fd;
         playos_log_write(s, "ipc", "shell listener registered (fd=%d)",
                          client_fd);
+
+        /* Sprint 11: a healthy shell registration marks this boot slot as
+         * "good" (one-shot gate — the ~60s main-loop fallback keeps this
+         * from depending solely on shell timing). */
+        playos_boot_mark_good_once(s);
+
         playos_ipc_message_free(&msg);
         return 0;
     }
@@ -646,6 +654,108 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         playos_ipc_message_free(&msg);
         /* Best-effort S3 suspend; never returns with the game stuck. */
         playos_suspend(s);
+        return 0;
+    }
+
+    /* ── ApplyUpdate (Sprint 11) ─────────────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_APPLY_UPDATE) == 0) {
+        char path[512] = {0};
+        (void)json_string_field(msg.json_raw, "path", path, sizeof(path));
+
+        static const char prefix[] = "/data/updates/";
+        static const char suffix[] = ".playosb";
+        size_t prefix_len = strlen(prefix);
+        size_t suffix_len = strlen(suffix);
+        size_t path_len = strlen(path);
+        int valid = (path_len > prefix_len + suffix_len)
+                 && (strncmp(path, prefix, prefix_len) == 0)
+                 && (strcmp(path + path_len - suffix_len, suffix) == 0);
+
+        if (!valid) {
+            playos_log_write(s, "ipc", "ApplyUpdate rejected: bad bundle path");
+            char err_json[256];
+            int err_len = snprintf(err_json, sizeof(err_json),
+                "{\"v\":%d,\"type\":\"%s\",\"reason\":\"invalid_bundle\"}",
+                PLAYOS_IPC_PROTOCOL_VERSION,
+                PLAYOS_IPC_TYPE_APPLY_UPDATE_ERROR);
+            if (err_len > 0 && (size_t)err_len < sizeof(err_json)) {
+                struct playos_ipc_frame *frame =
+                    malloc(sizeof(*frame) + (size_t)err_len);
+                if (frame) {
+                    frame->magic = PLAYOS_IPC_MAGIC;
+                    frame->length = (uint32_t)err_len;
+                    memcpy(frame->body, err_json, (size_t)err_len);
+                    (void)!write(client_fd, frame,
+                                 sizeof(*frame) + (size_t)err_len);
+                    free(frame);
+                }
+            }
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
+        if (s->game_pid != 0) {
+            playos_log_write(s, "ipc", "ApplyUpdate rejected: game running");
+            char err_json[256];
+            int err_len = snprintf(err_json, sizeof(err_json),
+                "{\"v\":%d,\"type\":\"%s\",\"reason\":\"game_running\"}",
+                PLAYOS_IPC_PROTOCOL_VERSION,
+                PLAYOS_IPC_TYPE_APPLY_UPDATE_ERROR);
+            if (err_len > 0 && (size_t)err_len < sizeof(err_json)) {
+                struct playos_ipc_frame *frame =
+                    malloc(sizeof(*frame) + (size_t)err_len);
+                if (frame) {
+                    frame->magic = PLAYOS_IPC_MAGIC;
+                    frame->length = (uint32_t)err_len;
+                    memcpy(frame->body, err_json, (size_t)err_len);
+                    (void)!write(client_fd, frame,
+                                 sizeof(*frame) + (size_t)err_len);
+                    free(frame);
+                }
+            }
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
+        /* Acknowledge immediately; the update runs synchronously on this
+         * connection and reports progress/completion as async events. */
+        char ack_json[128];
+        int ack_len = snprintf(ack_json, sizeof(ack_json),
+            "{\"v\":%d,\"type\":\"%s\",\"accepted\":true}",
+            PLAYOS_IPC_PROTOCOL_VERSION,
+            PLAYOS_IPC_TYPE_APPLY_UPDATE_ACK);
+        if (ack_len > 0 && (size_t)ack_len < sizeof(ack_json)) {
+            struct playos_ipc_frame *frame =
+                malloc(sizeof(*frame) + (size_t)ack_len);
+            if (frame) {
+                frame->magic = PLAYOS_IPC_MAGIC;
+                frame->length = (uint32_t)ack_len;
+                memcpy(frame->body, ack_json, (size_t)ack_len);
+                (void)!write(client_fd, frame,
+                             sizeof(*frame) + (size_t)ack_len);
+                free(frame);
+            }
+        }
+
+        playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_UPDATE_PROGRESS,
+                                 "\"stage\":\"verify\"");
+
+        int rc = update_apply(path);
+        if (rc == UPDATE_OK) {
+            playos_log_write(s, "ipc", "ApplyUpdate complete: %s", path);
+            playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_UPDATE_COMPLETE,
+                                     "\"status\":\"ok\"");
+        } else {
+            char reason_json[256];
+            snprintf(reason_json, sizeof(reason_json),
+                     "\"reason\":\"%s\"", update_reason_str(rc));
+            playos_log_write(s, "ipc", "ApplyUpdate failed: %s (%s)", path,
+                             update_reason_str(rc));
+            playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_UPDATE_ERROR,
+                                     reason_json);
+        }
+
+        playos_ipc_message_free(&msg);
         return 0;
     }
 

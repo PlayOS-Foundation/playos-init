@@ -42,6 +42,12 @@ static inline uint64_t le64_dec(const unsigned char *p)
          | ((uint64_t)p[7] << 56);
 }
 
+/** Decode little-endian uint16 from raw bytes. */
+static inline uint16_t le16_dec(const unsigned char *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
 /*
  * PlayOS data partition type GUID in GPT mixed-endian binary form.
  *
@@ -452,6 +458,127 @@ int playos_cmdline_has_flag(const char *flag)
 int playos_install_mode_requested(void)
 {
     return playos_cmdline_has_flag("playos.mode=install");
+}
+
+/* ── A/B boot slot partition lookup (Sprint 11) ───────────────────── */
+
+/*
+ * Scan /proc/partitions and, for each /dev/<name> device, read its GPT
+ * header at LBA 1 and walk the partition-entry array looking for a
+ * partition whose UTF-16LE name label matches `label`. On success fills
+ * `device_path` with the /dev/<name><sep><N> node and returns 0; returns
+ * -1 if no such partition is found.
+ */
+int playos_find_partition_by_label(const char *label, char *device_path,
+                                   size_t path_size)
+{
+    if (!label || !device_path || path_size == 0)
+        return -1;
+
+    FILE *parts = fopen("/proc/partitions", "r");
+    if (!parts)
+        return -1;
+
+    char line[256];
+    if (!fgets(line, sizeof(line), parts)) {   /* header line */
+        fclose(parts);
+        return -1;
+    }
+    if (!fgets(line, sizeof(line), parts)) {   /* blank line   */
+        fclose(parts);
+        return -1;
+    }
+
+    int found = 0;
+
+    while (fgets(line, sizeof(line), parts)) {
+        char name[64] = {0};
+        if (sscanf(line, "%*d %*d %*d %63s", name) != 1)
+            continue;
+
+        char dev[128];
+        snprintf(dev, sizeof(dev), "/dev/%s", name);
+
+        int fd = open(dev, O_RDONLY);
+        if (fd < 0)
+            continue;
+
+        unsigned char hdr[512];
+        if (pread(fd, hdr, sizeof(hdr), 512) != (ssize_t)sizeof(hdr)) {
+            close(fd);
+            continue;
+        }
+
+        if (memcmp(hdr, "EFI PART", 8) != 0) {
+            close(fd);
+            continue;
+        }
+
+        uint64_t entry_lba = le64_dec(hdr + 72);
+        uint32_t entry_cnt = le32_dec(hdr + 80);
+        uint32_t entry_sz  = le32_dec(hdr + 84);
+        if (entry_cnt == 0 || entry_cnt > 256 || entry_sz < 128) {
+            close(fd);
+            continue;
+        }
+
+        size_t table_bytes = (size_t)entry_cnt * entry_sz;
+        unsigned char *table = malloc(table_bytes);
+        if (!table) {
+            close(fd);
+            continue;
+        }
+
+        if (pread(fd, table, table_bytes, (off_t)entry_lba * 512)
+                == (ssize_t)table_bytes) {
+            for (uint32_t i = 0; i < entry_cnt; i++) {
+                const unsigned char *e = table + (size_t)i * entry_sz;
+
+                /* Skip entries with an all-zero type GUID (unused). */
+                int empty = 1;
+                for (int b = 0; b < 16; b++) {
+                    if (e[b] != 0) {
+                        empty = 0;
+                        break;
+                    }
+                }
+                if (empty)
+                    continue;
+
+                /* Partition name: 36 UTF-16LE code units at offset 56.
+                 * Stop at NUL or any non-ASCII code unit (labels we match
+                 * are plain ASCII). */
+                char pname[37];
+                int n = 0;
+                for (int u = 0; u < 36 && n < 36; u++) {
+                    uint16_t cu = le16_dec(e + 56 + u * 2);
+                    if (cu == 0 || cu > 0x7F)
+                        break;
+                    pname[n++] = (char)cu;
+                }
+                pname[n] = '\0';
+
+                if (strcmp(pname, label) == 0) {
+                    const char *sep =
+                        (strncmp(name, "nvme", 4) == 0 ||
+                         strncmp(name, "mmcblk", 6) == 0) ? "p" : "";
+                    snprintf(device_path, path_size, "/dev/%s%s%u",
+                             name, sep, i + 1);
+                    found = 1;
+                    break;
+                }
+            }
+        }
+
+        free(table);
+        close(fd);
+
+        if (found)
+            break;
+    }
+
+    fclose(parts);
+    return found ? 0 : -1;
 }
 
 /* ── Boot marker (diagnostic) ────────────────────────────────────── */
