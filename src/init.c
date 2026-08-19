@@ -27,6 +27,8 @@ void playos_init_state_init(struct playos_init_state *s)
     s->compositor_restarts.window_start = time(NULL);
     s->shell_pid = 0;
     s->overlay_pid = 0;
+    s->ssh_pid = 0;
+    s->ssh_restarts.window_start = time(NULL);
     s->shell_listener_fd = -1;
     s->compositor_conn_fd = -1;
     s->overlay_restarts.window_start = time(NULL);

@@ -46,6 +46,7 @@ static int compositor_should_restart(struct playos_init_state *s);
 static void spawn_shell(struct playos_init_state *s);
 static void spawn_overlay(struct playos_init_state *s);
 static void spawn_installer(struct playos_init_state *s);
+static void spawn_ssh(struct playos_init_state *s);
 
 /* ── Persistent child logging ────────────────────────────────────── */
 
@@ -158,6 +159,17 @@ void playos_supervisor_reap_children(struct playos_init_state *s)
                 signal_num = WTERMSIG(wstatus);
 
             playos_supervisor_installer_exited(s, exit_code, signal_num);
+        } else if (pid == s->ssh_pid) {
+            /* SSH bring-up exited (Sprint 11.6) */
+            int exit_code = -1;
+            int signal_num = 0;
+
+            if (WIFEXITED(wstatus))
+                exit_code = WEXITSTATUS(wstatus);
+            if (WIFSIGNALED(wstatus))
+                signal_num = WTERMSIG(wstatus);
+
+            playos_supervisor_ssh_exited(s, exit_code, signal_num);
         } else {
             /* Unknown child — log and move on */
             playos_log_write(s, "sup", "reaped unknown child PID %d", pid);
@@ -562,6 +574,94 @@ void playos_supervisor_installer_exited(struct playos_init_state *s,
 void playos_supervisor_spawn_installer(struct playos_init_state *s)
 {
 	spawn_installer(s);
+}
+
+/* ── Developer SSH supervision (Sprint 11.6) ─────────────────────── */
+
+static void spawn_ssh(struct playos_init_state *s)
+{
+    const char *path = "/usr/bin/playos-ssh-bringup";
+
+    playos_log_write(s, "sup", "spawning SSH bring-up: %s", path);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        playos_log_write(s, "sup", "ssh fork failed: %s",
+                         strerror(errno));
+        return;
+    }
+
+    if (pid == 0) {
+        /* Not a Wayland client — no compositor env needed. */
+        child_log_redirect("/data/log/ssh-bringup.log");
+
+        execl(path, path, NULL);
+
+        dprintf(STDERR_FILENO,
+                "playos-init: ssh exec failed: %s\n",
+                strerror(errno));
+        _exit(127);
+    }
+
+    /* Parent: track as child */
+    s->ssh_pid = pid;
+    playos_log_write(s, "sup", "ssh bring-up launched (PID %d)", pid);
+}
+
+static int ssh_should_restart(struct playos_init_state *s)
+{
+    time_t now = time(NULL);
+    struct playos_restart_info *r = &s->ssh_restarts;
+
+    if (now - r->window_start > PLAYOS_SSH_WINDOW_S) {
+        r->count = 0;
+        r->window_start = now;
+    }
+
+    r->count++;
+    return (r->count <= PLAYOS_SSH_MAX_RESTARTS);
+}
+
+static void ssh_restart(struct playos_init_state *s)
+{
+    playos_log_write(s, "sup",
+                     "restarting SSH bring-up in %d ms (attempt %d)",
+                     PLAYOS_SSH_RESTART_DELAY_MS,
+                     s->ssh_restarts.count);
+
+    usleep(PLAYOS_SSH_RESTART_DELAY_MS * 1000);
+
+    spawn_ssh(s);
+}
+
+void playos_supervisor_ssh_exited(struct playos_init_state *s,
+                                  int exit_code, int signal_num)
+{
+    s->ssh_restarts.last_exit_code = exit_code;
+    s->ssh_restarts.last_signal = signal_num;
+
+    playos_log_write(s, "sup",
+                     "ssh bring-up PID %d exited: code=%d signal=%d",
+                     s->ssh_pid, exit_code, signal_num);
+
+    s->ssh_pid = 0;
+
+    if (ssh_should_restart(s)) {
+        ssh_restart(s);
+    } else {
+        playos_log_write(s, "sup",
+                         "ssh restart limit exceeded (%d restarts in %ds) — "
+                         "leaving system running without SSH",
+                         PLAYOS_SSH_MAX_RESTARTS,
+                         PLAYOS_SSH_WINDOW_S);
+        /* Do NOT enter recovery — SSH is a developer convenience; the
+         * system must continue booting without it. */
+    }
+}
+
+void playos_supervisor_spawn_ssh(struct playos_init_state *s)
+{
+    spawn_ssh(s);
 }
 
 /* ── Game manifest helpers ──────────────────────────────────────── */

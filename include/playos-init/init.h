@@ -24,6 +24,9 @@
 #define PLAYOS_INSTALLER_MAX_RESTARTS     5
 #define PLAYOS_INSTALLER_WINDOW_S         30
 #define PLAYOS_INSTALLER_RESTART_DELAY_MS 250
+#define PLAYOS_SSH_MAX_RESTARTS           5
+#define PLAYOS_SSH_WINDOW_S               30
+#define PLAYOS_SSH_RESTART_DELAY_MS       250
 #define PLAYOS_GAME_EXIT_TIMEOUT_MS     2000
 #define PLAYOS_GAME_PAUSE_TIMEOUT_MS    500
 #define PLAYOS_LOG_RING_SIZE            (64 * 1024)
@@ -99,6 +102,10 @@ struct playos_init_state {
     pid_t                     installer_pid;
     struct playos_restart_info installer_restarts;
     int                       install_mode;        /* booted with playos.mode=install */
+
+    /* Developer SSH supervision (Sprint 11.6) */
+    pid_t                     ssh_pid;
+    struct playos_restart_info ssh_restarts;
 
     /* Game supervision */
     pid_t               game_pid;

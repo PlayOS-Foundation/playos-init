@@ -67,6 +67,13 @@ void playos_supervisor_spawn_installer(struct playos_init_state *s);
 void playos_supervisor_installer_exited(struct playos_init_state *s,
                                         int exit_code, int signal);
 
+/* Launch the developer SSH bring-up daemon (Sprint 11.6) */
+void playos_supervisor_spawn_ssh(struct playos_init_state *s);
+
+/* Handle SSH bring-up exit. Restarts if within limits. */
+void playos_supervisor_ssh_exited(struct playos_init_state *s,
+                                  int exit_code, int signal);
+
 /* Enter recovery mode */
 void playos_enter_recovery(struct playos_init_state *state, const char *reason);
 

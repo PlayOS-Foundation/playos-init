@@ -171,6 +171,11 @@ int main(void)
          * diagnostics (best-effort, never fatal). */
         playos_audio_debug_dump();
         playos_log_write(s, "init", "audio diagnostics written to /data/log/audio-debug.log");
+
+        /* Developer SSH (Sprint 11.6): only on the installed OS, never during
+         * installer repartitioning (avoids holding /data/ssh busy). */
+        if (!s->install_mode)
+            playos_supervisor_spawn_ssh(s);
     }
 
     /* Stage 3: Set up IPC sockets */
