@@ -26,6 +26,29 @@ static void le32_enc(uint32_t v, unsigned char out[4])
     out[3] = (unsigned char)((v >> 24) & 0xff);
 }
 
+/* Host-test seam for update_apply_at: return a temp file as the "partition"
+ * that update_apply would write the payload into. */
+static char g_partition_device[PATH_MAX];
+
+int playos_find_partition_by_label(const char *label, char *device_path,
+                                   size_t path_size)
+{
+    (void)label;
+    if (device_path != NULL && path_size > 0)
+        snprintf(device_path, path_size, "%s", g_partition_device);
+    return g_partition_device[0] == '\0' ? -1 : 0;
+}
+
+int update_apply_at(const char *path, const char *boot_json_path);
+
+static void read_file_into(const char *path, unsigned char *buf, size_t len)
+{
+    FILE *f = fopen(path, "rb");
+    assert(f != NULL);
+    assert(fread(buf, 1, len, f) == len);
+    assert(fclose(f) == 0);
+}
+
 /*
  * Build a well-formed .playosb bundle in memory:
  *
@@ -239,6 +262,76 @@ int main(void)
     assert(rc == UPDATE_ERR_INVALID_BUNDLE);
     printf("PASS: update_verify rejects bad magic\n");
 
+    /* 10. update_apply_at writes the payload into the inactive slot and
+     * flips boot.json to that slot (active a -> b). */
+    char apply_boot[PATH_MAX];
+    snprintf(apply_boot, sizeof(apply_boot), "%s/apply-boot.json", dir);
+
+    char slot_path[PATH_MAX];
+    snprintf(slot_path, sizeof(slot_path), "%s/slot-b.raw", dir);
+
+    const unsigned char old_slot[] = "OLD_SLOT_B_CONTENT_OLD_SLOT_B_CONTENT_OLD_SLOT_B";
+    write_file(slot_path, old_slot, sizeof(old_slot) - 1);
+
+    snprintf(g_partition_device, sizeof(g_partition_device), "%s", slot_path);
+
+    make_default_state(&st);
+    assert(boot_slot_write(apply_boot, &st) == 0);
+
+    rc = update_apply_at(bundle_path, apply_boot);
+    assert(rc == UPDATE_OK);
+
+    struct boot_slot_state applied;
+    assert(boot_slot_read(apply_boot, &applied) == 0);
+    assert(applied.active_slot == 'b');
+    assert(strcmp(applied.slot_b.version, "9.9.9") == 0);
+    assert(strcmp(applied.slot_b.health, "pending") == 0);
+    assert(applied.slot_b.boot_count == 0);
+    assert(strcmp(applied.slot_a.version, "1.2.3") == 0);
+    assert(strcmp(applied.slot_a.health, "good") == 0);
+    printf("PASS: update_apply_at flips active slot and records pending\n");
+
+    unsigned char written[64];
+    size_t payload_len = sizeof(payload) - 1;
+    read_file_into(slot_path, written, payload_len);
+    assert(memcmp(written, payload, payload_len) == 0);
+    printf("PASS: update_apply_at writes payload to inactive partition\n");
+
+    /* 11. A bad-signature bundle is rejected before touching boot.json or the
+     * inactive partition. */
+    unsigned char *bad_sig = malloc(bundle_len);
+    assert(bad_sig != NULL);
+    memcpy(bad_sig, bundle, bundle_len);
+    bad_sig[bundle_len - 1] = (bad_sig[bundle_len - 1] == 'a') ? 'b' : 'a';
+
+    char bad_sig_path[PATH_MAX];
+    snprintf(bad_sig_path, sizeof(bad_sig_path), "%s/apply-bad-sig.playosb", dir);
+    write_file(bad_sig_path, bad_sig, bundle_len);
+
+    make_default_state(&st);
+    assert(boot_slot_write(apply_boot, &st) == 0);
+    write_file(slot_path, old_slot, sizeof(old_slot) - 1);
+
+    rc = update_apply_at(bad_sig_path, apply_boot);
+    assert(rc == UPDATE_ERR_SIGNATURE_INVALID);
+
+    assert(boot_slot_read(apply_boot, &applied) == 0);
+    assert(applied.active_slot == 'a');
+    assert(strcmp(applied.slot_b.health, "empty") == 0);
+    printf("PASS: update_apply_at rejects bad signature without state change\n");
+
+    /* 12. A bad-magic bundle is rejected before touching boot.json. */
+    make_default_state(&st);
+    assert(boot_slot_write(apply_boot, &st) == 0);
+
+    rc = update_apply_at(bad_path, apply_boot);
+    assert(rc == UPDATE_ERR_INVALID_BUNDLE);
+
+    assert(boot_slot_read(apply_boot, &applied) == 0);
+    assert(applied.active_slot == 'a');
+    printf("PASS: update_apply_at rejects bad magic without state change\n");
+
+    free(bad_sig);
     free(bad);
     free(bundle);
 

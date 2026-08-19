@@ -116,13 +116,14 @@ if(BUILD_TESTS)
     target_compile_options(test_init_state PRIVATE -Wall -Wextra)
     add_test(NAME init_state COMMAND test_init_state)
 
-    # Boot slot + update verification test
+    # Boot slot + update verification/apply test. The test provides its own
+    # playos_find_partition_by_label() seam, so mount.c is intentionally not
+    # linked here.
     add_executable(test_boot_slot
         tests/host/test_boot_slot.c
         src/boot_slot.c
         src/update.c
         src/sha256.c
-        src/mount.c
         src/logging.c
     )
     target_include_directories(test_boot_slot PRIVATE include)

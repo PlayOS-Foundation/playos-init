@@ -398,9 +398,14 @@ const char *update_reason_str(int rc)
     }
 }
 
-int update_apply(const char *path)
+/*
+ * Testable apply core. `boot_json_path` lets the host test point the A/B
+ * accounting at a temp file instead of the real /EFI/playos/boot.json; the
+ * production entry point below always uses the real path.
+ */
+int update_apply_at(const char *path, const char *boot_json_path)
 {
-    if (!path)
+    if (!path || !boot_json_path)
         return UPDATE_ERR_INTERNAL;
 
     if (s_update_in_progress)
@@ -417,7 +422,7 @@ int update_apply(const char *path)
     }
 
     struct boot_slot_state bs;
-    (void)boot_slot_read(PLAYOS_BOOT_JSON_PATH, &bs);
+    (void)boot_slot_read(boot_json_path, &bs);
 
     char inactive = (bs.active_slot == 'a') ? 'b' : 'a';
     char part_label[16];
@@ -450,7 +455,7 @@ int update_apply(const char *path)
     snprintf(newactive->health, sizeof(newactive->health), "pending");
 
     bs.active_slot = inactive;
-    if (boot_slot_write(PLAYOS_BOOT_JSON_PATH, &bs) != 0) {
+    if (boot_slot_write(boot_json_path, &bs) != 0) {
         dprintf(STDERR_FILENO, "playos-init: update: failed to write boot.json\n");
         s_update_in_progress = 0;
         return UPDATE_ERR_INTERNAL;
@@ -459,4 +464,9 @@ int update_apply(const char *path)
     sync();
     s_update_in_progress = 0;
     return UPDATE_OK;
+}
+
+int update_apply(const char *path)
+{
+    return update_apply_at(path, PLAYOS_BOOT_JSON_PATH);
 }
