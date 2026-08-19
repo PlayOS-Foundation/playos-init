@@ -604,6 +604,18 @@ int playos_find_partition_by_label(const char *label, char *device_path,
  */
 int playos_pivot_to_active_slot(struct playos_init_state *s)
 {
+    /* Installer boots always run from the removable boot medium's
+     * initramfs. A previously-installed internal slot (squashfs playos-a/b)
+     * may already be present on the target NVMe; pivoting into it would
+     * hide /usr/bin/playos-installer (which lives only in the installer
+     * initramfs) and break the installer with exec ENOENT. */
+    if (s->install_mode) {
+        playos_log_write(s, "init",
+                         "installer mode: staying in initramfs "
+                         "(skip pivot to installed slot)");
+        return 1;
+    }
+
     /* If / is already squashfs, we are the exec'd init inside the real
      * root and there is nothing left to pivot. */
     FILE *mounts = fopen("/proc/mounts", "r");

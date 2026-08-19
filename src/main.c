@@ -90,8 +90,14 @@ int main(void)
 
     /* Sprint 11: mount the EFI System Partition (rw) for A/B boot slot
      * accounting. Best-effort — a missing or unmountable ESP never
-     * hard-fails boot; we simply skip slot accounting. */
-    {
+     * hard-fails boot; we simply skip slot accounting.
+     *
+     * Installer mode skips this entirely: the target internal disk may
+     * already carry an "ESP" label and we are about to repartition it, so
+     * mounting its old ESP here would make the later fdisk/mkfs steps fail
+     * busy. The installer discovers its payload from playos-a directly and
+     * does not use /EFI. */
+    if (!s->install_mode) {
         char esp_dev[128] = {0};
         if (playos_find_partition_by_label("ESP", esp_dev,
                                            sizeof(esp_dev)) == 0) {
@@ -126,6 +132,10 @@ int main(void)
                 reboot(RB_AUTOBOOT);
             }
         }
+    } else {
+        playos_log_write(s, "init",
+                         "installer mode: skipping ESP mount (target disk may "
+                         "already carry an ESP label)");
     }
 
     /* Sprint 11.5: hand control to the real read-only rootfs slot when the
