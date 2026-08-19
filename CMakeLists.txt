@@ -123,6 +123,7 @@ if(BUILD_TESTS)
         src/update.c
         src/sha256.c
         src/mount.c
+        src/logging.c
     )
     target_include_directories(test_boot_slot PRIVATE include)
     target_compile_options(test_boot_slot PRIVATE -Wall -Wextra)

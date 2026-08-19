@@ -17,6 +17,9 @@
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
+#include "playos-init/boot_slot.h"
+
+extern char **environ;
 
 /* ── GPT helpers ─────────────────────────────────────────────────── */
 
@@ -579,6 +582,92 @@ int playos_find_partition_by_label(const char *label, char *device_path,
 
     fclose(parts);
     return found ? 0 : -1;
+}
+
+/* ── Pivot into active A/B rootfs slot (Sprint 11.5) ─────────────── */
+
+/*
+ * Sprint 11.5: hand control from the initramfs to the real read-only
+ * rootfs slot. Installed internal disks carry the active slot as a raw
+ * squashfs filesystem (playos-a / playos-b). The initramfs is the
+ * early-boot shim: it does ESP/boot.json accounting, then pivots into the
+ * selected squashfs and execs its /init.
+ *
+ * Uses the busybox switch_root idiom (mount --move + chroot) rather than
+ * pivot_root: the new root is read-only, so we cannot create pivot_root's
+ * put_old directory inside it.
+ *
+ * Returns 0 on success, which never actually returns because the new init
+ * is exec'd. Returns non-zero when the pivot must be skipped (live USB, no
+ * raw squashfs slot, or a mount failure), so the caller keeps booting from
+ * the initramfs exactly as before.
+ */
+int playos_pivot_to_active_slot(struct playos_init_state *s)
+{
+    /* If / is already squashfs, we are the exec'd init inside the real
+     * root and there is nothing left to pivot. */
+    FILE *mounts = fopen("/proc/mounts", "r");
+    if (mounts) {
+        char line[512];
+        while (fgets(line, sizeof(line), mounts)) {
+            char src[128], dst[256], fstype[64];
+            if (sscanf(line, "%127s %255s %63s", src, dst, fstype) == 3 &&
+                strcmp(dst, "/") == 0) {
+                if (strcmp(fstype, "squashfs") == 0) {
+                    fclose(mounts);
+                    return 1;
+                }
+                break;
+            }
+        }
+        fclose(mounts);
+    }
+
+    /* Select the active slot from boot.json (safe default: slot a). */
+    struct boot_slot_state bs;
+    boot_slot_read(PLAYOS_BOOT_JSON_PATH, &bs);
+    const char *label = (bs.active_slot == 'b') ? "playos-b" : "playos-a";
+
+    char dev[128] = {0};
+    if (playos_find_partition_by_label(label, dev, sizeof(dev)) != 0) {
+        playos_log_write(s, "init",
+                         "no %s partition found — staying in initramfs",
+                         label);
+        return 1;
+    }
+
+    mkdir("/mnt/newroot", 0755);
+
+    /* Raw slot: squashfs, read-only. Do NOT fall back to ext2/auto — the
+     * live USB's playos-a is an ext2 carrier and must not be pivoted into. */
+    if (mount(dev, "/mnt/newroot", "squashfs", MS_RDONLY, NULL) != 0) {
+        playos_log_write(s, "init",
+                         "active slot %s is not a raw squashfs (%s) — "
+                         "staying in initramfs", label, strerror(errno));
+        rmdir("/mnt/newroot");
+        return 1;
+    }
+
+    playos_log_write(s, "init",
+                     "pivoting to active slot %c (%s, read-only squashfs)",
+                     bs.active_slot, dev);
+
+    if (chdir("/mnt/newroot") != 0 ||
+        mount(".", "/", NULL, MS_MOVE, NULL) != 0 ||
+        chroot(".") != 0 ||
+        chdir("/") != 0) {
+        playos_log_write(s, "init",
+                         "pivot switch_root failed: %s — staying in initramfs",
+                         strerror(errno));
+        return 1;
+    }
+
+    char *const argv[] = { "/init", NULL };
+    execve("/init", argv, environ);
+
+    /* execve failed — unreachable in a healthy boot. */
+    playos_log_write(s, "init", "exec /init failed: %s", strerror(errno));
+    return 1;
 }
 
 /* ── Boot marker (diagnostic) ────────────────────────────────────── */

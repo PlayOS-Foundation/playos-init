@@ -128,6 +128,11 @@ int main(void)
         }
     }
 
+    /* Sprint 11.5: hand control to the real read-only rootfs slot when the
+     * active slot is a raw squashfs. Success never returns (exec /init);
+     * failure falls through to the legacy initramfs boot path. */
+    playos_pivot_to_active_slot(s);
+
     /* Stage 2: Discover and mount data partition */
     playos_boot_stage_write(BOOT_STAGE_DATA_DISCOVERY);
     if (playos_mount_data(s) != 0) {

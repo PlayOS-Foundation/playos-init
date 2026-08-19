@@ -32,4 +32,10 @@ int playos_install_mode_requested(void);
 int playos_find_partition_by_label(const char *label, char *device_path,
                                    size_t path_size);
 
+/* Sprint 11.5: pivot from the initramfs into the active raw squashfs slot
+ * (playos-a / playos-b) and exec its /init. Returns non-zero when the pivot
+ * is skipped (live USB / no squashfs slot / mount failure); success never
+ * returns. */
+int playos_pivot_to_active_slot(struct playos_init_state *s);
+
 #endif /* PLAYOS_MOUNT_H */
