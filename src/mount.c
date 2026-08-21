@@ -124,11 +124,13 @@ int playos_mount_virtual(void)
 /* ── Data partition discovery ────────────────────────────────────── */
 
 /*
- * Search for the data partition in order:
+ * Search for the data partition. Highest-priority first:
+ *   0. The playos-data partition on the disk that / is mounted from
  *   1. Partition with label "playos-data" via /dev/disk/by-label/
  *   2. Direct scan of common block devices (for systems without udev)
- *   3. GPT partition type GUID (reserved for future use)
- *   4. UUID from kernel command line: playos.data_uuid=<uuid>
+ *   3. /proc/partitions scan for label "playos-data"
+ *   4. GPT partition type GUID (reserved for future use)
+ *   5. UUID from kernel command line: playos.data_uuid=<uuid>
  */
 
 /*
@@ -173,24 +175,65 @@ static int read_ext4_label(const char *device, char *label, size_t label_size)
     return 0;
 }
 
-/* Check whether a partition's parent disk is removable (e.g. USB stick).
- * /dev/sda3 -> sda, /dev/nvme0n1p3 -> nvme0n1, /dev/mmcblk0p3 -> mmcblk0 */
+/* Extract the whole-disk name from a partition device name.
+ *   nvme0n1p5 -> nvme0n1   mmcblk0p3 -> mmcblk0   sda3 -> sda
+ * Whole disks (nvme0n1, sda) pass through unchanged. */
+static void partition_parent_disk(const char *name, char *disk, size_t size)
+{
+    size_t len = strlen(name);
+
+    /* nvme/mmcblk partition nodes use a 'p' separator before the number. */
+    if (strncmp(name, "nvme", 4) == 0 || strncmp(name, "mmcblk", 6) == 0) {
+        size_t cut = len;
+        const char *p = strrchr(name, 'p');
+        if (p && p > name) {
+            const char *q = p + 1;
+            if (*q >= '1' && *q <= '9') {
+                int digits = 1;
+                for (const char *r = q; *r; r++) {
+                    if (*r < '0' || *r > '9') { digits = 0; break; }
+                }
+                if (digits)
+                    cut = (size_t)(p - name);
+            }
+        }
+        if (cut >= size) cut = size - 1;
+        memcpy(disk, name, cut);
+        disk[cut] = '\0';
+        return;
+    }
+
+    /* sd/vd/virtio style: strip trailing digits. */
+    size_t cut = len;
+    while (cut > 0 && name[cut - 1] >= '0' && name[cut - 1] <= '9')
+        cut--;
+    if (cut >= size) cut = size - 1;
+    memcpy(disk, name, cut);
+    disk[cut] = '\0';
+}
+
+/* Trailing partition number from a device name (nvme0n1p5 -> 5, sda3 -> 3),
+ * or -1 when the name carries no numeric partition suffix. */
+static int partition_number(const char *name)
+{
+    size_t len = strlen(name);
+    size_t i = len;
+    while (i > 0 && name[i - 1] >= '0' && name[i - 1] <= '9')
+        i--;
+    if (i == len || i == 0)
+        return -1;
+    return atoi(name + i);
+}
+
+/* Check whether a partition's parent disk is removable (e.g. USB stick). */
 static int device_is_removable(const char *dev_path)
 {
     const char *base = strrchr(dev_path, '/');
     base = base ? base + 1 : dev_path;
 
     char disk[64];
-    snprintf(disk, sizeof(disk), "%s", base);
-    size_t len = strlen(disk);
-
-    /* nvme/mmc style: strip trailing "pN"; sd/vd style: strip digits */
-    while (len > 0 && disk[len - 1] >= '0' && disk[len - 1] <= '9')
-        disk[--len] = '\0';
-    if (len > 0 && disk[len - 1] == 'p' &&
-        (strstr(disk, "nvme") || strstr(disk, "mmcblk")))
-        disk[--len] = '\0';
-    if (len == 0)
+    partition_parent_disk(base, disk, sizeof(disk));
+    if (disk[0] == '\0')
         return 0;
 
     char sys_path[128];
@@ -203,14 +246,106 @@ static int device_is_removable(const char *dev_path)
     return c == '1';
 }
 
+/* Resolve the whole disk backing the root filesystem from /proc/mounts.
+ * After the slot pivot, / is the squashfs slot (e.g. /dev/nvme0n1p2); before
+ * the pivot, or for a live/installer initramfs boot, / has no /dev/ backing
+ * device. Fills `disk` with the parent disk name and returns 0, else -1. */
+static int get_root_disk(char *disk, size_t size)
+{
+    FILE *f = fopen("/proc/mounts", "r");
+    if (!f)
+        return -1;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char src[128], dst[256], fstype[64];
+        if (sscanf(line, "%127s %255s %63s", src, dst, fstype) != 3)
+            continue;
+        if (strcmp(dst, "/") != 0)
+            continue;
+
+        if (strncmp(src, "/dev/", 5) != 0) {
+            disk[0] = '\0';
+            fclose(f);
+            return -1;
+        }
+
+        partition_parent_disk(src + 5, disk, size);
+        fclose(f);
+        return (disk[0] != '\0') ? 0 : -1;
+    }
+
+    fclose(f);
+    return -1;
+}
+
+/* Find the playos-data partition that lives on `root_disk`. When more than
+ * one candidate exists (a stale slot-B superblock left by an older layout),
+ * prefer the highest partition number — data is always the last partition. */
+static int find_data_on_disk(const char *root_disk, char *device_path,
+                             size_t path_size)
+{
+    FILE *parts = fopen("/proc/partitions", "r");
+    if (!parts)
+        return -1;
+
+    char line[256];
+    fgets(line, sizeof(line), parts); /* header */
+    fgets(line, sizeof(line), parts); /* blank  */
+
+    char best_path[128] = {0};
+    int  best_partno   = -1;
+
+    while (fgets(line, sizeof(line), parts)) {
+        char name[64] = {0};
+        if (sscanf(line, "%*d %*d %*d %63s", name) != 1)
+            continue;
+
+        char disk[64];
+        partition_parent_disk(name, disk, sizeof(disk));
+        if (strcmp(disk, root_disk) != 0)
+            continue;
+        if (strcmp(disk, name) == 0)   /* whole disk, not a partition */
+            continue;
+
+        char dev_path[128];
+        snprintf(dev_path, sizeof(dev_path), "/dev/%s", name);
+        if (access(dev_path, F_OK) != 0)
+            continue;
+
+        char label[32] = {0};
+        if (read_ext4_label(dev_path, label, sizeof(label)) != 0 ||
+            strcmp(label, "playos-data") != 0)
+            continue;
+
+        int partno = partition_number(name);
+        if (partno > best_partno) {
+            best_partno = partno;
+            snprintf(best_path, sizeof(best_path), "%s", dev_path);
+        }
+    }
+
+    fclose(parts);
+
+    if (best_partno < 0)
+        return -1;
+
+    snprintf(device_path, path_size, "%s", best_path);
+    return 0;
+}
+
 static int find_data_partition(char *device_path, size_t path_size)
 {
-    /* When several playos-data partitions exist (e.g. a USB stick and an
-     * internal install), prefer the one on removable media — that is the
-     * device we booted from. Otherwise the LAST match wins: USB storage
-     * enumerates after built-in NVMe, so the stick tends to come last. */
+    /* Resolution order:
+     *   0. the playos-data partition on the disk we booted from (installed
+     *      systems must never be hijacked by a still-attached installer USB)
+     *   1. a removable playos-data partition (the installer/live-USB case)
+     *   2. any remaining playos-data partition as a last-resort fallback */
     char fallback_path[128] = {0};
     int have_fallback = 0;
+
+    char root_disk[64] = {0};
+    int have_root_disk = (get_root_disk(root_disk, sizeof(root_disk)) == 0);
 
     /* Try up to 10 times with increasing delays (100ms → 1000ms)
      * because block device detection may be asynchronous even with
@@ -218,6 +353,15 @@ static int find_data_partition(char *device_path, size_t path_size)
     for (int attempt = 0; attempt < 10; attempt++) {
         if (attempt > 0) {
             usleep(attempt * 100000); /* 100ms, 200ms, 300ms... */
+        }
+
+        /* Strategy 0: data partition on the disk we booted from. */
+        if (have_root_disk &&
+            find_data_on_disk(root_disk, device_path, path_size) == 0) {
+            dprintf(STDERR_FILENO,
+                    "playos-init: data partition on boot disk (%s): %s\n",
+                    root_disk, device_path);
+            return 0;
         }
 
         /* Strategy 1: Label "playos-data" via udev symlinks */
