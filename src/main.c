@@ -98,9 +98,21 @@ int main(void)
      * busy. The installer discovers its payload from playos-a directly and
      * does not use /EFI. */
     if (!s->install_mode) {
+        /* Block partition enumeration can lag devtmpfs node creation: the
+         * kernel's /proc/partitions may already list the ESP while its
+         * /dev/<name><N> node (or the vfat mount) is not ready yet, which
+         * surfaces as mount() returning ENODEV. Retry find+mount on a short
+         * cooldown so late ESP registration is tolerated. This stays
+         * best-effort and never hard-fails boot. */
         char esp_dev[128] = {0};
-        if (playos_find_partition_by_label("ESP", esp_dev,
-                                           sizeof(esp_dev)) == 0) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            if (attempt > 0)
+                usleep(attempt * 100000); /* 100ms, 200ms, ... up to 900ms */
+
+            if (playos_find_partition_by_label("ESP", esp_dev,
+                                               sizeof(esp_dev)) != 0)
+                continue;
+
             mkdir("/EFI", 0755);
             int esp_ok = (mount(esp_dev, "/EFI", "vfat", 0, NULL) == 0);
             if (!esp_ok)
@@ -110,15 +122,23 @@ int main(void)
                 mkdir("/EFI/playos", 0755);
                 playos_log_write(s, "init",
                                  "ESP mounted at /EFI (device %s)", esp_dev);
-            } else {
-                playos_log_write(s, "init",
-                                 "WARN: failed to mount ESP at /EFI: %s",
-                                 strerror(errno));
+                break;
             }
-        } else {
-            dprintf(STDERR_FILENO,
-                    "playos-init: WARN: no ESP partition found — "
-                    "skipping A/B boot slot accounting\n");
+            playos_log_write(s, "init",
+                             "WARN: ESP mount attempt %d failed: %s",
+                             attempt + 1, strerror(errno));
+        }
+
+        if (!s->efi_mounted) {
+            if (esp_dev[0] != '\0') {
+                playos_log_write(s, "init",
+                                 "WARN: failed to mount ESP at /EFI after "
+                                 "retries: %s", strerror(errno));
+            } else {
+                dprintf(STDERR_FILENO,
+                        "playos-init: WARN: no ESP partition found — "
+                        "skipping A/B boot slot accounting\n");
+            }
         }
 
         if (s->efi_mounted) {
