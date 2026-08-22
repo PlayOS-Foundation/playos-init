@@ -114,10 +114,7 @@ int main(void)
                 continue;
 
             mkdir("/EFI", 0755);
-            int esp_ok = (mount(esp_dev, "/EFI", "vfat", 0, NULL) == 0);
-            if (!esp_ok)
-                esp_ok = (mount(esp_dev, "/EFI", "auto", 0, NULL) == 0);
-            if (esp_ok) {
+            if (mount(esp_dev, "/EFI", "vfat", 0, NULL) == 0) {
                 s->efi_mounted = 1;
                 mkdir("/EFI/playos", 0755);
                 playos_log_write(s, "init",
