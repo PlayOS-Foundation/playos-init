@@ -118,6 +118,18 @@ int playos_mount_virtual(void)
         return -1;
     }
 
+    /* /tmp — writable scratch space. The active slot is a read-only squashfs,
+     * so /tmp must be a tmpfs for tools that assume a writable temp dir (the
+     * stock udhcpc default.script calls mktemp, which defaults to /tmp and
+     * fails with EROFS otherwise). mode=1777 matches the conventional sticky
+     * bit; /var/tmp is a symlink to ../tmp so it is covered too. */
+    mkdir("/tmp", 0755);
+    if (mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777") != 0) {
+        dprintf(STDERR_FILENO, "playos-init: mount /tmp failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+
     return 0;
 }
 
