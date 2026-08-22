@@ -189,9 +189,12 @@ int main(void)
         playos_audio_debug_dump();
         playos_log_write(s, "init", "audio diagnostics written to /data/log/audio-debug.log");
 
-        /* Developer SSH (Sprint 11.6): only on the installed OS, never during
-         * installer repartitioning (avoids holding /data/ssh busy). */
-        if (!s->install_mode)
+        /* Developer SSH (Sprint 11.6): only on the installed OS, never
+         * during installer repartitioning (avoids holding /data/ssh
+         * busy), and only when the dev-image bring-up script is actually
+         * shipped (Sprint 12 production images exclude it). */
+        if (!s->install_mode &&
+            access("/usr/bin/playos-ssh-bringup", X_OK) == 0)
             playos_supervisor_spawn_ssh(s);
     }
 

@@ -20,6 +20,7 @@
 #include "playos-init/supervisor.h"
 #include "playos-init/mount.h"
 #include "playos-init/ipc_handler.h"
+#include "playos-init/security.h"
 #include "ipc.h"
 
 /* ── External logging ────────────────────────────────────────────── */
@@ -836,6 +837,32 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
 
     playos_log_write(s, "sup", "spawning game: %s (%s)", game_id, exe_path);
 
+    /* S12-T8: warn-only manifest signature verification. Never blocks
+     * launch — the result only drives a log line. */
+    {
+        char sig_path[672];
+        int  mrc;
+
+        snprintf(sig_path, sizeof(sig_path), "%s.sig", manifest);
+        mrc = playos_security_verify_manifest(manifest, sig_path);
+
+        if (mrc == 0)
+            playos_log_write(s, "sup", "manifest signature verified: %s",
+                             manifest);
+        else if (mrc == 1)
+            playos_log_write(s, "sup",
+                             "WARN: game manifest is UNSIGNED (no %s.sig): %s",
+                             manifest, manifest);
+        else if (mrc == -1)
+            playos_log_write(s, "sup",
+                             "WARN: game manifest signature INVALID: %s",
+                             manifest);
+        else
+            playos_log_write(s, "sup",
+                             "WARN: game manifest signature unverifiable: %s",
+                             manifest);
+    }
+
     /* Lifecycle pipe: init writes single-byte lifecycle events; the game
      * inherits the read end via the PLAYOS_LIFECYCLE_FD environment
      * variable (see playos_lifecycle.c in libplayos). Non-fatal on
@@ -892,11 +919,52 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
             close(lifecycle_write_fd);
 
         /* Persist the game's stdout/stderr to the data partition so a
-         * crash, assertion, or loader error is visible on the USB. */
+         * crash, assertion, or loader error is visible on the USB. This
+         * open happens BEFORE the Landlock sandbox is applied — the
+         * inherited fd stays valid afterwards. */
         char log_path[256];
         snprintf(log_path, sizeof(log_path),
                  "/data/log/game-%s-stderr.log", game_id);
         child_log_redirect(log_path);
+
+        /* ── Sprint 12 game sandbox ──────────────────────────────────
+         * Order matters: no_new_privs first (Landlock restrict_self
+         * needs it), then Landlock while still root, then the credential
+         * drop (seccomp denies setuid/setgid/capset), then seccomp. */
+        if (playos_security_disable_priv_escalation() != 0) {
+            dprintf(STDERR_FILENO,
+                    "playos-init: PR_SET_NO_NEW_PRIVS failed: %s\n",
+                    strerror(errno));
+            _exit(126);
+        }
+
+        {
+            int ll = playos_security_apply_landlock(game_id);
+            if (ll == 1) {
+                dprintf(STDERR_FILENO,
+                        "playos-init: WARN: Landlock unsupported on this "
+                        "kernel — launching game WITHOUT filesystem sandbox\n");
+            } else if (ll != 0) {
+                dprintf(STDERR_FILENO,
+                        "playos-init: WARN: Landlock setup failed (%s) — "
+                        "launching game WITHOUT filesystem sandbox\n",
+                        strerror(errno));
+            }
+        }
+
+        if (playos_security_drop_privileges() != 0) {
+            dprintf(STDERR_FILENO,
+                    "playos-init: game credential drop failed: %s\n",
+                    strerror(errno));
+            _exit(126);
+        }
+
+        if (playos_security_apply_seccomp() != 0) {
+            dprintf(STDERR_FILENO,
+                    "playos-init: WARN: seccomp filter failed (%s) — "
+                    "launching game WITHOUT syscall filter\n",
+                    strerror(errno));
+        }
 
         /* Run from the game directory so relative assets resolve. */
         char game_dir[640];

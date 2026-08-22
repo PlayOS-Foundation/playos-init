@@ -30,6 +30,13 @@ set(PLAYOS_INIT_SOURCES
     src/sha256.c
     src/boot_slot.c
     src/update.c
+    # Sprint 12 security sandbox
+    src/security/sandbox.c
+    src/security/landlock.c
+    src/security/seccomp_filter.c
+    src/security/manifest_verify.c
+    src/security/ed25519.c
+    src/security/sha512.c
     # IPC framing from playos-runtime (bundled copy)
     ipc/ipc_framing.c
     ipc/ipc_server.c
@@ -46,6 +53,7 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/boot_slot.h
     include/playos-init/update.h
     include/playos-init/sha256.h
+    include/playos-init/security.h
 )
 
 # ── Executable ──────────────────────────────────────────────────────
@@ -129,4 +137,18 @@ if(BUILD_TESTS)
     target_include_directories(test_boot_slot PRIVATE include)
     target_compile_options(test_boot_slot PRIVATE -Wall -Wextra)
     add_test(NAME boot_slot COMMAND test_boot_slot)
+
+    # Sprint 12 security tests (seccomp/Landlock run in forked children).
+    add_executable(test_security
+        tests/host/test_security.c
+        src/security/sandbox.c
+        src/security/landlock.c
+        src/security/seccomp_filter.c
+        src/security/manifest_verify.c
+        src/security/ed25519.c
+        src/security/sha512.c
+    )
+    target_include_directories(test_security PRIVATE include src/security)
+    target_compile_options(test_security PRIVATE -Wall -Wextra)
+    add_test(NAME security COMMAND test_security)
 endif()
