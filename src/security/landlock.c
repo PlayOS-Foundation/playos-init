@@ -3,8 +3,8 @@
  *
  * Builds a default-deny Landlock ruleset granting exactly the paths a game
  * needs (game dir read+execute, per-game saves/cache read-write, /tmp,
- * /run/playos, the musl dynamic-loader paths, ALSA and wl_shm device paths)
- * and restricts the game process to it before exec.
+ * /run/playos, the musl dynamic-loader paths, ALSA, evdev, DRM-render and
+ * wl_shm device paths) and restricts the game process to it before exec.
  *
  * Rule construction is data-driven: one path-construction function takes the
  * launch identity (game id now, profile id later) so Sprint 21 can add
@@ -232,6 +232,14 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
                                         LANDLOCK_ACCESS_FS_READ_FILE,
                                         p->dev_input) != 0)
         goto fail;
+    /* DRM render node — client-side EGL/GLES2 needs O_RDWR. The primary
+     * node /dev/dri/card* stays denied by the drm group (Unix DAC), not by
+     * Landlock, so granting the /dev/dri directory is safe. */
+    if (landlock_add_path_rule_optional(ruleset_fd,
+                                        LANDLOCK_ACCESS_FS_READ_FILE |
+                                            LANDLOCK_ACCESS_FS_WRITE_FILE,
+                                        p->dev_dri) != 0)
+        goto fail;
     /* Wayland wl_shm fallback. */
     if (landlock_add_path_rule(ruleset_fd, LL_RW_DIR, p->dev_shm) != 0)
         goto fail;
@@ -286,6 +294,7 @@ playos_security_apply_landlock(const char *game_id)
     p.usr_lib     = "/usr/lib";
     p.dev_snd     = "/dev/snd";
     p.dev_input   = "/dev/input";
+    p.dev_dri     = "/dev/dri";
     p.dev_shm     = "/dev/shm";
     p.asound_conf = "/etc/asound.conf";
 

@@ -171,6 +171,7 @@ static char ll_config[80];
 static char ll_run[80];
 static char ll_tmp[80];
 static char ll_devsnd[80];
+static char ll_devdri[80];
 
 static int
 setup_landlock_dirs(void)
@@ -183,6 +184,7 @@ setup_landlock_dirs(void)
     snprintf(ll_run, sizeof(ll_run), "%s/run", ll_root);
     snprintf(ll_tmp, sizeof(ll_tmp), "%s/scratch", ll_root);
     snprintf(ll_devsnd, sizeof(ll_devsnd), "%s/snd", ll_root);
+    snprintf(ll_devdri, sizeof(ll_devdri), "%s/dri", ll_root);
 
     if (mkdir(ll_root, 0700) != 0)
         return -1;
@@ -200,6 +202,8 @@ setup_landlock_dirs(void)
         return -1;
     if (mkdir(ll_devsnd, 0755) != 0)
         return -1;
+    if (mkdir(ll_devdri, 0755) != 0)
+        return -1;
 
     /* A file in the game dir (allowed) and one in config (forbidden). */
     {
@@ -212,6 +216,11 @@ setup_landlock_dirs(void)
         close(fd);
         snprintf(path, sizeof(path), "%s/secret.txt", ll_config);
         fd = open(path, O_WRONLY | O_CREAT, 0600);
+        if (fd < 0)
+            return -1;
+        close(fd);
+        snprintf(path, sizeof(path), "%s/renderD128", ll_devdri);
+        fd = open(path, O_WRONLY | O_CREAT, 0660);
         if (fd < 0)
             return -1;
         close(fd);
@@ -239,6 +248,7 @@ child_landlock(void)
     p.lib_dir     = "/lib";
     p.usr_lib     = "/usr/lib";
     p.dev_snd     = ll_devsnd;
+    p.dev_dri     = ll_devdri;
     p.dev_shm     = "/dev/shm";
     p.asound_conf = NULL;
 
@@ -265,6 +275,13 @@ child_landlock(void)
     fd = open(path, O_WRONLY | O_CREAT, 0600);
     if (fd < 0)
         return 23;
+    close(fd);
+
+    /* Allowed: open the DRM render node read-write (EGL/GLES2). */
+    snprintf(path, sizeof(path), "%s/renderD128", ll_devdri);
+    fd = open(path, O_RDWR);
+    if (fd < 0)
+        return 26;
     close(fd);
 
     /* Denied: read from the config dir (not in the allowlist). */

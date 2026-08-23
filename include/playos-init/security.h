@@ -59,6 +59,7 @@ struct playos_landlock_paths {
     const char *usr_lib;      /* read+execute (shared libraries)       */
     const char *dev_snd;      /* read+write (ALSA)                     */
     const char *dev_input;    /* read (evdev controller nodes)         */
+    const char *dev_dri;      /* read+write (DRM render node)          */
     const char *dev_shm;      /* read-write (wl_shm)                   */
     const char *asound_conf;  /* read, optional                        */
 };
