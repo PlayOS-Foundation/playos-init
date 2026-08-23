@@ -74,13 +74,16 @@ playos_security_drop_privileges(void)
      * the explicit capset below just closes the pre-exec window. */
 
     /* Supplementary groups for device access. The game must reach
-     * /dev/dri/renderD* (render) for EGL/GLES2 and /dev/snd/ nodes for
-     * ALSA. Without these the game fails eglInitialize with "Permission
-     * denied" on /dev/dri/renderD128 and exits before its first frame.
-     * The primary DRM node /dev/dri/card* and the input nodes stay
-     * root-only (no video/input/drm membership). */
-    gid_t groups[2] = { PLAYOS_RENDER_GID, PLAYOS_AUDIO_GID };
-    if (setgroups(2, groups) != 0)
+     * /dev/dri/renderD* (render) for EGL/GLES2, /dev/snd/ nodes for ALSA,
+     * and /dev/input/event* (input) for the built-in controller via
+     * libplayos's evdev backend. Without render the game fails
+     * eglInitialize with "Permission denied" on /dev/dri/renderD128 and
+     * exits before its first frame; without input the game logs "no
+     * controller device found" every 2s. The primary DRM node
+     * /dev/dri/card* stays root-only (no video/drm membership). */
+    gid_t groups[3] = { PLAYOS_RENDER_GID, PLAYOS_AUDIO_GID,
+                        PLAYOS_INPUT_GID };
+    if (setgroups(3, groups) != 0)
         return -1;
 
     if (setgid(PLAYOS_GAME_GID) != 0)

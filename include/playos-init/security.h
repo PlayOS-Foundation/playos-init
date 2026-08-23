@@ -28,10 +28,14 @@
  * users-table.txt:
  *   - render (108): /dev/dri/renderD* for client-side EGL/GLES2
  *   - audio  (29):  /dev/snd/ nodes for ALSA
- * Games are intentionally NOT in video/input/drm — the primary DRM node
- * /dev/dri/card* and the input nodes stay root-only. */
+ *   - input  (102): /dev/input/event* for the built-in controller
+ *                   (libplayos evdev backend). Reserved buttons are still
+ *                   stripped from game-facing snapshots by the backend.
+ * Games are intentionally NOT in video/drm — the primary DRM node
+ * /dev/dri/card* stays root-only. */
 #define PLAYOS_RENDER_GID 108
 #define PLAYOS_AUDIO_GID  29
+#define PLAYOS_INPUT_GID  102
 
 /* 1. Disable privilege escalation for this process and its children. */
 int playos_security_disable_priv_escalation(void);
@@ -54,6 +58,7 @@ struct playos_landlock_paths {
     const char *lib_dir;      /* read+execute (musl loader)            */
     const char *usr_lib;      /* read+execute (shared libraries)       */
     const char *dev_snd;      /* read+write (ALSA)                     */
+    const char *dev_input;    /* read (evdev controller nodes)         */
     const char *dev_shm;      /* read-write (wl_shm)                   */
     const char *asound_conf;  /* read, optional                        */
 };
@@ -62,8 +67,8 @@ struct playos_landlock_paths {
  * as playos_security_apply_landlock(). */
 int playos_landlock_apply_ruleset(const struct playos_landlock_paths *p);
 
-/* 3. Restrict supplementary groups to {render, audio} and drop credentials
- * to PLAYOS_GAME_UID/GID. Also clears all capabilities from the
+/* 3. Restrict supplementary groups to {render, audio, input} and drop
+ * credentials to PLAYOS_GAME_UID/GID. Also clears all capabilities from the
  * effective/permitted sets before the uid change. Must run while still
  * root. */
 int playos_security_drop_privileges(void);

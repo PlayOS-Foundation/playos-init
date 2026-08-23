@@ -227,6 +227,11 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
                                    LANDLOCK_ACCESS_FS_WRITE_FILE,
                                p->dev_snd) != 0)
         goto fail;
+    /* evdev controller nodes — libplayos reads these for gamepad input. */
+    if (landlock_add_path_rule_optional(ruleset_fd,
+                                        LANDLOCK_ACCESS_FS_READ_FILE,
+                                        p->dev_input) != 0)
+        goto fail;
     /* Wayland wl_shm fallback. */
     if (landlock_add_path_rule(ruleset_fd, LL_RW_DIR, p->dev_shm) != 0)
         goto fail;
@@ -280,6 +285,7 @@ playos_security_apply_landlock(const char *game_id)
     p.lib_dir     = "/lib";
     p.usr_lib     = "/usr/lib";
     p.dev_snd     = "/dev/snd";
+    p.dev_input   = "/dev/input";
     p.dev_shm     = "/dev/shm";
     p.asound_conf = "/etc/asound.conf";
 
