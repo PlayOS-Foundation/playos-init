@@ -73,6 +73,13 @@ add_executable(playos-game-stub tests/playos-game-stub.c)
 target_compile_options(playos-game-stub PRIVATE -Wall -Wextra)
 target_link_options(playos-game-stub PRIVATE -static)
 
+# ── On-device security self-test (launched as the game identity) ───
+
+add_executable(playos-security-selftest tests/security_selftest.c)
+target_include_directories(playos-security-selftest PRIVATE include)
+target_compile_options(playos-security-selftest PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_options(playos-security-selftest PRIVATE -static)
+
 # ── IPC test client (for QEMU integration tests) ───────────────────
 
 add_executable(ipc-test-client
@@ -106,6 +113,7 @@ target_link_options(playos-init PRIVATE
 install(TARGETS playos-init RUNTIME DESTINATION /)
 install(TARGETS playos-compositor-placeholder RUNTIME DESTINATION /usr/bin)
 install(TARGETS playos-game-stub RUNTIME DESTINATION /usr/bin)
+install(TARGETS playos-security-selftest RUNTIME DESTINATION /usr/bin)
 install(TARGETS ipc-test-client RUNTIME DESTINATION /usr/bin)
 
 # ── Tests ───────────────────────────────────────────────────────────

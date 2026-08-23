@@ -50,7 +50,7 @@ static void print_banner(void)
     dprintf(STDERR_FILENO,
         "\n"
         "  ╔══════════════════════════════════════════════════╗\n"
-        "  ║              PlayOS — Sprint 6                   ║\n"
+        "  ║                      PlayOS                      ║\n"
         "  ║      playos-init PID 1 Boot Supervisor           ║\n"
         "  ╚══════════════════════════════════════════════════╝\n"
         "\n");
@@ -256,9 +256,9 @@ int main(void)
     playos_boot_stage_write(BOOT_STAGE_READY);
     playos_log_write(s, "init", "system ready — entering supervision loop");
     if (s->install_mode) {
-        dprintf(STDERR_FILENO, "\n  PlayOS Sprint 10 — playos-installer on wlroots DRM/KMS\n");
+        dprintf(STDERR_FILENO, "\n  PlayOS — playos-installer on wlroots DRM/KMS\n");
     } else {
-        dprintf(STDERR_FILENO, "\n  PlayOS Sprint 6 — playos-shell on wlroots DRM/KMS\n");
+        dprintf(STDERR_FILENO, "\n  PlayOS — playos-shell on wlroots DRM/KMS\n");
     }
     dprintf(STDERR_FILENO, "  System ready.\n\n");
 
