@@ -951,6 +951,13 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
                      "pivoting to active slot %c (%s, read-only squashfs)",
                      bs.active_slot, dev);
 
+    /* Release the ESP before switching roots so the exec'd second init can
+     * re-mount it cleanly. Without this the device stays busy across the
+     * pivot and the second init's mount fails with EBUSY, which both spams
+     * warnings and leaves mark-good without a mounted ESP. */
+    if (s->efi_mounted)
+        umount("/EFI");
+
     if (chdir("/mnt/newroot") != 0 ||
         mount(".", "/", NULL, MS_MOVE, NULL) != 0 ||
         chroot(".") != 0 ||

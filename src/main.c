@@ -90,6 +90,12 @@ int main(void)
     if (s->install_mode)
         playos_log_write(s, "init", "installer mode: playos.mode=install present");
 
+    /* Are we the exec'd init already running inside the read-only squashfs
+     * slot? The first init (initramfs) counts the boot and records boot.json
+     * before pivoting; the second init must not re-count, but still mounts
+     * the ESP so mark-good can persist boot.json later. */
+    int already_pivoted = playos_root_is_squashfs();
+
     /* Set up SIGCHLD handler for zombie reaping */
     playos_supervisor_init_signal_handler();
 
@@ -143,7 +149,11 @@ int main(void)
             }
         }
 
-        if (s->efi_mounted) {
+        /* Boot counting happens exactly once, in the first (initramfs) init.
+         * The exec'd second init re-mounts the ESP above but must not advance
+         * the counter again — doing so would double-count every boot and
+         * falsely trigger 3-strike rollback. */
+        if (s->efi_mounted && !already_pivoted) {
             struct boot_slot_state bs;
             if (boot_slot_increment(PLAYOS_BOOT_JSON_PATH, &bs)) {
                 playos_log_write(s, "init",

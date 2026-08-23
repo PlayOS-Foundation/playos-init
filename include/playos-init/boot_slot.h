@@ -68,4 +68,12 @@ int boot_slot_rollback(const char *path, struct boot_slot_state *st);
  */
 void playos_boot_mark_good_once(struct playos_init_state *s);
 
+/*
+ * Return 1 when / is mounted read-only squashfs (i.e. init has already
+ * pivoted into the active slot and this is the exec'd second init). Used to
+ * skip boot-count accounting on the second init (the first init already
+ * counted it) and to gate mark-good against fallback initramfs boots.
+ */
+int playos_root_is_squashfs(void);
+
 #endif /* PLAYOS_BOOT_SLOT_H */
