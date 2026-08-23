@@ -4,7 +4,8 @@
  * Builds a default-deny Landlock ruleset granting exactly the paths a game
  * needs (game dir read+execute, per-game saves/cache read-write, /tmp,
  * /run/playos, the musl dynamic-loader paths, ALSA, evdev, DRM-render and
- * wl_shm device paths) and restricts the game process to it before exec.
+ * wl_shm device paths, plus /dev and /sys enumeration for device discovery)
+ * and restricts the game process to it before exec.
  *
  * Rule construction is data-driven: one path-construction function takes the
  * launch identity (game id now, profile id later) so Sprint 21 can add
@@ -66,6 +67,24 @@
 
 /* Read-only game content: files + dynamic traversal. */
 #define LL_GAME_RO (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_EXECUTE)
+
+/* Device directories must be enumerable: libdrm/Mesa, ALSA and evdev all
+ * opendir()+readdir() their node directories to discover devices (e.g. Mesa's
+ * drmGetDevices2() lists /dev/dri to find the render node for EGL). Without
+ * READ_DIR these scans get EACCES and EGL/audio/input silently break. */
+#define LL_DEV_RW_DIR                                                      \
+    (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE |        \
+     LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE)
+#define LL_DEV_RO_DIR                                                      \
+    (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |          \
+     LANDLOCK_ACCESS_FS_EXECUTE)
+/* Directory traversal + listing only (no file content). */
+#define LL_ENUM_DIR (LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE)
+/* sysfs is read-only and must be traversable so libdrm can resolve PCI
+ * device↔DRM-node identity (drmGetDevices2 → sysfs uevent/dev links). */
+#define LL_SYS_RO                                                          \
+    (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR |          \
+     LANDLOCK_ACCESS_FS_EXECUTE)
 
 /* Read-write scratch/save/cache: files + create/remove. */
 #define LL_RW_DIR                                                          \
@@ -222,26 +241,29 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
                                p->usr_lib) != 0)
         goto fail;
     /* ALSA PCM/control nodes — audio must keep working (Sprint 8). */
-    if (landlock_add_path_rule(ruleset_fd,
-                               LANDLOCK_ACCESS_FS_READ_FILE |
-                                   LANDLOCK_ACCESS_FS_WRITE_FILE,
-                               p->dev_snd) != 0)
+    if (landlock_add_path_rule(ruleset_fd, LL_DEV_RW_DIR, p->dev_snd) != 0)
         goto fail;
     /* evdev controller nodes — libplayos reads these for gamepad input. */
-    if (landlock_add_path_rule_optional(ruleset_fd,
-                                        LANDLOCK_ACCESS_FS_READ_FILE,
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_DEV_RO_DIR,
                                         p->dev_input) != 0)
         goto fail;
     /* DRM render node — client-side EGL/GLES2 needs O_RDWR. The primary
      * node /dev/dri/card* stays denied by the drm group (Unix DAC), not by
      * Landlock, so granting the /dev/dri directory is safe. */
-    if (landlock_add_path_rule_optional(ruleset_fd,
-                                        LANDLOCK_ACCESS_FS_READ_FILE |
-                                            LANDLOCK_ACCESS_FS_WRITE_FILE,
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_DEV_RW_DIR,
                                         p->dev_dri) != 0)
+        goto fail;
+    /* /dev itself must be listable so device discovery (opendir("/dev")
+     * and friends) can reach the node directories above. */
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_ENUM_DIR,
+                                        p->dev_dir) != 0)
         goto fail;
     /* Wayland wl_shm fallback. */
     if (landlock_add_path_rule(ruleset_fd, LL_RW_DIR, p->dev_shm) != 0)
+        goto fail;
+    /* sysfs: libdrm/Mesa resolve DRM render nodes and their PCI device via
+     * /sys (drmGetDevices2). Read-only + traversable. */
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_SYS_RO, p->sys_dir) != 0)
         goto fail;
     /* ALSA reads /etc/asound.conf (optional single-file rule). */
     if (landlock_add_path_rule_optional(ruleset_fd,
@@ -292,10 +314,12 @@ playos_security_apply_landlock(const char *game_id)
     p.run_playos  = "/run/playos";
     p.lib_dir     = "/lib";
     p.usr_lib     = "/usr/lib";
+    p.dev_dir     = "/dev";
     p.dev_snd     = "/dev/snd";
     p.dev_input   = "/dev/input";
     p.dev_dri     = "/dev/dri";
     p.dev_shm     = "/dev/shm";
+    p.sys_dir     = "/sys";
     p.asound_conf = "/etc/asound.conf";
 
     return playos_landlock_apply_ruleset(&p);

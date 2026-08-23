@@ -57,10 +57,12 @@ struct playos_landlock_paths {
     const char *run_playos;   /* read+execute (Wayland socket path)    */
     const char *lib_dir;      /* read+execute (musl loader)            */
     const char *usr_lib;      /* read+execute (shared libraries)       */
-    const char *dev_snd;      /* read+write (ALSA)                     */
-    const char *dev_input;    /* read (evdev controller nodes)         */
-    const char *dev_dri;      /* read+write (DRM render node)          */
+    const char *dev_dir;      /* list+traverse (device enumeration)    */
+    const char *dev_snd;      /* read+write+list (ALSA)                */
+    const char *dev_input;    /* read+list (evdev controller nodes)    */
+    const char *dev_dri;      /* read+write+list (DRM render node)     */
     const char *dev_shm;      /* read-write (wl_shm)                   */
+    const char *sys_dir;      /* read+list (sysfs, libdrm/Mesa)        */
     const char *asound_conf;  /* read, optional                        */
 };
 
