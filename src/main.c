@@ -80,6 +80,11 @@ int main(void)
     playos_log_init(s);
     playos_log_write(s, "init", "playos-init starting as PID %d", getpid());
 
+    /* Sprint 12: start udevd and settle the device queue so /dev nodes get
+     * their final ownership/group/mode (render, audio, input, ...) before
+     * the compositor and games start. Best-effort, never hard-fails boot. */
+    playos_udev_start(s);
+
     /* Sprint 10: detect installer boot before data-mount policy decisions. */
     s->install_mode = playos_install_mode_requested();
     if (s->install_mode)
@@ -147,6 +152,27 @@ int main(void)
                 boot_slot_rollback(PLAYOS_BOOT_JSON_PATH, &bs);
                 sync();
                 reboot(RB_AUTOBOOT);
+            }
+
+            /* S11.5-T5 Case 1: a clean install has no boot.json (the file is
+             * only ever created by the update path). Materialize a default
+             * slot-A-good state on the first boot so a fresh install's slot
+             * accounting is recorded from the start, matching the Sprint 11
+             * spec ("missing boot.json → slot A good"). Best-effort — never
+             * hard-fail boot over a boot.json write. */
+            if (access(PLAYOS_BOOT_JSON_PATH, F_OK) != 0) {
+                struct boot_slot_state fresh;
+                /* boot_slot_read fills `fresh` with the safe default even
+                 * when the file is missing. */
+                boot_slot_read(PLAYOS_BOOT_JSON_PATH, &fresh);
+                if (boot_slot_write(PLAYOS_BOOT_JSON_PATH, &fresh) != 0) {
+                    playos_log_write(s, "init",
+                                     "WARN: failed to create boot.json: %s",
+                                     strerror(errno));
+                } else {
+                    playos_log_write(s, "init",
+                                     "created default boot.json (slot A good)");
+                }
             }
         }
     } else {

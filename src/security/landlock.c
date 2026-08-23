@@ -171,16 +171,20 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
     uint64_t  handled;
     uint64_t  abi;
     int       ruleset_fd;
+    long      abi_ret;
 
     /* Query the Landlock ABI version (landlock_create_ruleset with the
      * VERSION flag returns the version instead of creating a ruleset). */
-    abi = (uint64_t)syscall(SYS_landlock_create_ruleset, NULL, 0,
-                            LANDLOCK_CREATE_RULESET_VERSION);
-    if (abi < 1) {
-        /* 0 or negative: Landlock unsupported/disabled. Loud fallback —
-         * the caller logs an alert and continues without the sandbox. */
+    abi_ret = syscall(SYS_landlock_create_ruleset, NULL, 0,
+                      LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi_ret < 1) {
+        /* -1 (ENOSYS: kernel lacks Landlock), 0 (disabled), or an older
+         * ABI than v1 — all mean the sandbox is unavailable. Loud
+         * fallback: the caller logs an alert and continues without the
+         * filesystem sandbox. */
         return 1;
     }
+    abi = (uint64_t)abi_ret;
 
     handled = LL_BASE_RIGHTS;
     if (abi >= 2)

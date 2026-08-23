@@ -11,6 +11,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <dirent.h>
 #include <limits.h>
@@ -129,6 +130,91 @@ int playos_mount_virtual(void)
                 strerror(errno));
         return -1;
     }
+
+    return 0;
+}
+
+/* ── udev startup (Sprint 12) ────────────────────────────────────── */
+
+/* Run a command to completion and return its exit status, or -1 if it could
+ * not be spawned or was killed by a signal. Used only for best-effort udev
+ * bring-up, so failures are logged but never abort boot. */
+static int run_cmd(const char *path, char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        execv(path, argv);
+        dprintf(STDERR_FILENO, "playos-init: exec %s failed: %s\n",
+                path, strerror(errno));
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    return -1;
+}
+
+int playos_udev_start(struct playos_init_state *s)
+{
+    /* Best-effort: an image built without eudev simply skips device
+     * permission management. Games then depend only on devtmpfs defaults,
+     * which is exactly the pre-udev behaviour we are replacing. */
+    if (access("/sbin/udevd", X_OK) != 0) {
+        playos_log_write(s, "udev",
+                         "udevd not present — skipping device permission setup");
+        return 0;
+    }
+
+    /* udevd's control socket and database live under /run/udev. */
+    mkdir("/run/udev", 0755);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        playos_log_write(s, "udev", "fork failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Stay in the foreground as a supervised child of PID 1 (no
+         * --daemon), so udevd outlives boot and keeps reacting to device
+         * hotplug for the whole session. */
+        execl("/sbin/udevd", "udevd", NULL);
+        dprintf(STDERR_FILENO, "playos-init: exec udevd failed: %s\n",
+                strerror(errno));
+        _exit(127);
+    }
+    playos_log_write(s, "udev", "udevd started (PID %d)", pid);
+
+    /* Re-run the rule engine over already-enumerated devices, then wait for
+     * the queue to drain so every /dev node carries its final owner/group/
+     * mode (render, audio, input, ...) before the compositor and games start.
+     * Both are best-effort: a missing udevadm or a slow queue must never
+     * block boot. */
+    if (access("/usr/bin/udevadm", X_OK) != 0) {
+        playos_log_write(s, "udev",
+                         "udevadm not present — skipping trigger/settle");
+        return 0;
+    }
+
+    char *const trigger_argv[] = {
+        "/usr/bin/udevadm", "trigger", "--action=add", NULL
+    };
+    int rc = run_cmd(trigger_argv[0], trigger_argv);
+    if (rc != 0)
+        playos_log_write(s, "udev", "WARN: udevadm trigger exited %d", rc);
+
+    char *const settle_argv[] = {
+        "/usr/bin/udevadm", "settle", NULL
+    };
+    rc = run_cmd(settle_argv[0], settle_argv);
+    if (rc != 0)
+        playos_log_write(s, "udev", "WARN: udevadm settle exited %d", rc);
 
     return 0;
 }
@@ -346,7 +432,32 @@ static int find_data_on_disk(const char *root_disk, char *device_path,
     return 0;
 }
 
-static int find_data_partition(char *device_path, size_t path_size)
+/* The internal install target is always NVMe (/dev/nvme0n1) or eMMC
+ * (/dev/mmcblk0). In installer mode the data partition must come from the
+ * removable/external media (the USB stick), never the internal install
+ * target, so we reject NVMe/eMMC outright instead of trusting the
+ * possibly-unreliable /sys/block/<disk>/removable flag. */
+static int device_is_internal(const char *dev_path)
+{
+    const char *base = strrchr(dev_path, '/');
+    base = base ? base + 1 : dev_path;
+    return (strncmp(base, "nvme", 4) == 0) ||
+           (strncmp(base, "mmcblk", 6) == 0);
+}
+
+/* Return non-zero when a candidate data partition should be used
+ * immediately. Normal boots prefer removable media; installer boots
+ * require the device not be an internal NVMe/eMMC target. */
+static int data_partition_is_preferred(const char *dev_path,
+                                       int require_removable)
+{
+    if (require_removable)
+        return !device_is_internal(dev_path);
+    return device_is_removable(dev_path);
+}
+
+static int find_data_partition(char *device_path, size_t path_size,
+                               int require_removable)
 {
     /* Resolution order:
      *   0. the playos-data partition on the disk we booted from (installed
@@ -368,7 +479,7 @@ static int find_data_partition(char *device_path, size_t path_size)
         }
 
         /* Strategy 0: data partition on the disk we booted from. */
-        if (have_root_disk &&
+        if (!require_removable && have_root_disk &&
             find_data_on_disk(root_disk, device_path, path_size) == 0) {
             dprintf(STDERR_FILENO,
                     "playos-init: data partition on boot disk (%s): %s\n",
@@ -382,15 +493,26 @@ static int find_data_partition(char *device_path, size_t path_size)
             ssize_t len = readlink(label_path, device_path, path_size - 1);
             if (len > 0) {
                 device_path[len] = '\0';
-                if (device_is_removable(device_path)) {
+                /* eudev creates these by-label symlinks with relative targets
+                 * ("../../sda3"); a raw relative path is useless to mount()
+                 * resolved from PID1's CWD ("/"). Resolve to an absolute path
+                 * so the installer can actually mount the USB data partition. */
+                if (device_path[0] != '/') {
+                    char resolved[PATH_MAX];
+                    if (realpath(label_path, resolved))
+                        snprintf(device_path, path_size, "%s", resolved);
+                }
+                if (data_partition_is_preferred(device_path, require_removable)) {
                     dprintf(STDERR_FILENO,
                             "playos-init: data partition by label (removable): %s\n",
                             device_path);
                     return 0;
                 }
                 /* remember last non-removable match as fallback */
-                snprintf(fallback_path, sizeof(fallback_path), "%s", device_path);
-                have_fallback = 1;
+                if (!require_removable) {
+                    snprintf(fallback_path, sizeof(fallback_path), "%s", device_path);
+                    have_fallback = 1;
+                }
             }
         }
 
@@ -405,7 +527,7 @@ static int find_data_partition(char *device_path, size_t path_size)
             char label[32] = {0};
             if (read_ext4_label(*c, label, sizeof(label)) == 0) {
                 if (strcmp(label, "playos-data") == 0) {
-                    if (device_is_removable(*c)) {
+                    if (data_partition_is_preferred(*c, require_removable)) {
                         snprintf(device_path, path_size, "%s", *c);
                         dprintf(STDERR_FILENO,
                                 "playos-init: data partition by scan (removable): %s\n",
@@ -413,8 +535,10 @@ static int find_data_partition(char *device_path, size_t path_size)
                         return 0;
                     }
                     /* remember last non-removable match as fallback */
-                    snprintf(fallback_path, sizeof(fallback_path), "%s", *c);
-                    have_fallback = 1;
+                    if (!require_removable) {
+                        snprintf(fallback_path, sizeof(fallback_path), "%s", *c);
+                        have_fallback = 1;
+                    }
                 }
             }
         }
@@ -436,7 +560,7 @@ static int find_data_partition(char *device_path, size_t path_size)
                     char label[32] = {0};
                     if (read_ext4_label(dev_path, label, sizeof(label)) == 0) {
                         if (strcmp(label, "playos-data") == 0) {
-                            if (device_is_removable(dev_path)) {
+                            if (data_partition_is_preferred(dev_path, require_removable)) {
                                 snprintf(device_path, path_size, "%s", dev_path);
                                 fclose(parts);
                                 dprintf(STDERR_FILENO,
@@ -445,9 +569,11 @@ static int find_data_partition(char *device_path, size_t path_size)
                                 return 0;
                             }
                             /* remember last non-removable match as fallback */
-                            snprintf(fallback_path, sizeof(fallback_path),
-                                     "%s", dev_path);
-                            have_fallback = 1;
+                            if (!require_removable) {
+                                snprintf(fallback_path, sizeof(fallback_path),
+                                         "%s", dev_path);
+                                have_fallback = 1;
+                            }
                         }
                     }
                 }
@@ -457,7 +583,7 @@ static int find_data_partition(char *device_path, size_t path_size)
     }
 
     /* No removable playos-data found — accept the last one seen */
-    if (have_fallback) {
+    if (!require_removable && have_fallback) {
         snprintf(device_path, path_size, "%s", fallback_path);
         dprintf(STDERR_FILENO,
                 "playos-init: data partition (last-found fallback): %s\n",
@@ -543,6 +669,10 @@ static int find_data_partition(char *device_path, size_t path_size)
                         snprintf(device_path, path_size,
                                  "/dev/%s%d", gpt_name, part_num);
                     }
+                    if (!data_partition_is_preferred(device_path, require_removable)) {
+                        /* internal target in installer mode — keep scanning */
+                        continue;
+                    }
                     fclose(gpt_parts);
                     dprintf(STDERR_FILENO,
                             "playos-init: data partition by GPT GUID:"
@@ -567,7 +697,8 @@ static int find_data_partition(char *device_path, size_t path_size)
                 if (uuid_len > 0 && uuid_len < 64) {
                     snprintf(device_path, path_size,
                              "/dev/disk/by-uuid/%.*s", uuid_len, p);
-                    if (access(device_path, F_OK) == 0) {
+                    if (access(device_path, F_OK) == 0 &&
+                        data_partition_is_preferred(device_path, require_removable)) {
                         fclose(cmdline);
                         dprintf(STDERR_FILENO,
                                 "playos-init: data partition by UUID: %s\n",
@@ -929,11 +1060,10 @@ static void log_available_block_devices(void)
 
 int playos_mount_data(struct playos_init_state *state)
 {
-    (void)state;
-
     char device_path[256] = {0};
 
-    if (find_data_partition(device_path, sizeof(device_path)) != 0) {
+    if (find_data_partition(device_path, sizeof(device_path),
+                            state->install_mode) != 0) {
         dprintf(STDERR_FILENO,
                 "playos-init: data partition not found "
                 "(label=playos-data, block-device scan, /proc/partitions, "
@@ -958,7 +1088,9 @@ int playos_mount_data(struct playos_init_state *state)
         }
     }
 
-    dprintf(STDERR_FILENO, "playos-init: /data mounted from %s\n", device_path);
+    dprintf(STDERR_FILENO,
+            "playos-init: /data mounted from %s (install_mode=%d)\n",
+            device_path, state->install_mode);
 
     /* Drop a marker on every playos-data partition so the choice is
      * visible from any of them after the fact */

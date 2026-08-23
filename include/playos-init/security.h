@@ -23,6 +23,16 @@
 #define PLAYOS_GAME_UID 1001
 #define PLAYOS_GAME_GID 1001
 
+/* Supplementary groups the game needs for device access. Kept in sync
+ * with br2-external/board/common/rootfs-overlay/etc/group and
+ * users-table.txt:
+ *   - render (108): /dev/dri/renderD* for client-side EGL/GLES2
+ *   - audio  (29):  /dev/snd/ nodes for ALSA
+ * Games are intentionally NOT in video/input/drm — the primary DRM node
+ * /dev/dri/card* and the input nodes stay root-only. */
+#define PLAYOS_RENDER_GID 108
+#define PLAYOS_AUDIO_GID  29
+
 /* 1. Disable privilege escalation for this process and its children. */
 int playos_security_disable_priv_escalation(void);
 
@@ -52,9 +62,10 @@ struct playos_landlock_paths {
  * as playos_security_apply_landlock(). */
 int playos_landlock_apply_ruleset(const struct playos_landlock_paths *p);
 
-/* 3. Drop supplementary groups and credentials to PLAYOS_GAME_UID/GID.
- * Also clears all capabilities from the effective/permitted sets before
- * the uid change. Must run while still root. */
+/* 3. Restrict supplementary groups to {render, audio} and drop credentials
+ * to PLAYOS_GAME_UID/GID. Also clears all capabilities from the
+ * effective/permitted sets before the uid change. Must run while still
+ * root. */
 int playos_security_drop_privileges(void);
 
 /* 4. Apply the seccomp-BPF deny-list. Returns 0 on success, -1 on error. */

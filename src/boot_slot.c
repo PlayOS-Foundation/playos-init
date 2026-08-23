@@ -303,6 +303,31 @@ int boot_slot_rollback(const char *path, struct boot_slot_state *st)
     return boot_slot_write(path, st);
 }
 
+/* Return 1 when / is mounted read-only squashfs (i.e. the initramfs
+ * successfully pivoted into the active slot). Used to gate mark-good so a
+ * fallback initramfs boot — where the pivot failed and the full system is
+ * still running out of the initramfs — never marks a broken slot good. */
+static int root_is_squashfs(void)
+{
+    FILE *mounts = fopen("/proc/mounts", "r");
+    if (!mounts)
+        return 0;
+
+    char line[512];
+    while (fgets(line, sizeof(line), mounts)) {
+        char src[128], dst[256], fstype[64];
+        if (sscanf(line, "%127s %255s %63s", src, dst, fstype) == 3 &&
+            strcmp(dst, "/") == 0) {
+            int is_sq = (strcmp(fstype, "squashfs") == 0);
+            fclose(mounts);
+            return is_sq;
+        }
+    }
+
+    fclose(mounts);
+    return 0;
+}
+
 void playos_boot_mark_good_once(struct playos_init_state *s)
 {
     if (!s || s->boot_slot_marked_good)
@@ -312,6 +337,17 @@ void playos_boot_mark_good_once(struct playos_init_state *s)
 
     if (!s->efi_mounted)
         return;
+
+    /* S11.5-T5 Case 3: only mark the active slot good when / is actually the
+     * read-only squashfs slot (the pivot succeeded). On a fallback initramfs
+     * boot / is not squashfs — marking good here would reset boot_count and
+     * defeat 3-strike rollback, so accumulate boot_count instead. */
+    if (!root_is_squashfs()) {
+        dprintf(STDERR_FILENO,
+                "playos-init: root not on squashfs — skipping mark-good "
+                "(boot_count accumulates for rollback)\n");
+        return;
+    }
 
     struct boot_slot_state bs;
     if (boot_slot_mark_good(PLAYOS_BOOT_JSON_PATH, &bs) != 0)

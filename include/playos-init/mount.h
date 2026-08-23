@@ -9,6 +9,11 @@
 /* Mount virtual filesystems: /dev, /proc, /sys, /run */
 int playos_mount_virtual(void);
 
+/* Start udevd and run udevadm trigger + settle so /dev nodes get their
+ * final ownership/group/mode (render, audio, input, ...) before the
+ * compositor and games start. Best-effort: never hard-fails boot. */
+int playos_udev_start(struct playos_init_state *s);
+
 /* Discover and mount the data partition at /data */
 int playos_mount_data(struct playos_init_state *state);
 
