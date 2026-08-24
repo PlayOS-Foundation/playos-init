@@ -25,6 +25,7 @@
 #include "playos-init/thermal.h"
 #include "playos-init/shutdown.h"
 #include "playos-init/ipc_handler.h"
+#include "playos-init/hwmon_names.h"
 
 /* IPC framing/type constants (bundled from playos-runtime) */
 #include "ipc.h"
@@ -123,8 +124,8 @@ static int read_thermal_zone_by_type(const char *want)
 }
 
 /*
- * Read the AMD GPU junction temperature (hwmon `amdgpu` / `temp1_input`).
- * Returns degrees Celsius, or -1 if unavailable.
+ * Read the GPU junction temperature (hwmon `amdgpu`/`i915`/`xe` /
+ * `temp1_input`). Returns degrees Celsius, or -1 if unavailable.
  */
 static int read_hwmon_gpu_temp(void)
 {
@@ -146,7 +147,7 @@ static int read_hwmon_gpu_temp(void)
         if (read_str_file(name_path, name, sizeof(name)) < 0)
             continue;
 
-        if (strcmp(name, "amdgpu") != 0)
+        if (!playos__hwmon_name_is_gpu(name))
             continue;
 
         char temp_path[384];
@@ -163,10 +164,10 @@ static int read_hwmon_gpu_temp(void)
 }
 
 /*
- * Read the AMD CPU package temperature from the k10temp hwmon node.
- * The Ally exposes CPU temp via k10temp/temp1_input rather than a named
- * thermal zone, so fall back to it when thermal-zone lookups fail.
- * Returns degrees Celsius, or -1 if unavailable.
+ * Read the CPU package temperature from the k10temp (AMD) or coretemp
+ * (Intel) hwmon node. The Ally exposes CPU temp via k10temp/temp1_input
+ * rather than a named thermal zone, so fall back to it when thermal-zone
+ * lookups fail. Returns degrees Celsius, or -1 if unavailable.
  */
 static int read_hwmon_cpu_temp(void)
 {
@@ -188,7 +189,7 @@ static int read_hwmon_cpu_temp(void)
         if (read_str_file(name_path, name, sizeof(name)) < 0)
             continue;
 
-        if (strcmp(name, "k10temp") != 0)
+        if (!playos__hwmon_name_is_cpu(name))
             continue;
 
         char temp_path[384];

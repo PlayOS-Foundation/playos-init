@@ -27,6 +27,7 @@ set(PLAYOS_INIT_SOURCES
     src/ipc_handler.c
     src/audio_debug.c
     src/thermal.c
+    src/hwmon_names.c
     src/sha256.c
     src/boot_slot.c
     src/update.c
@@ -131,6 +132,15 @@ if(BUILD_TESTS)
     target_include_directories(test_init_state PRIVATE include)
     target_compile_options(test_init_state PRIVATE -Wall -Wextra)
     add_test(NAME init_state COMMAND test_init_state)
+
+    # Sprint 13 T5: vendor-agnostic hwmon name classification
+    add_executable(test_hwmon_names
+        tests/host/test_hwmon_names.c
+        src/hwmon_names.c
+    )
+    target_include_directories(test_hwmon_names PRIVATE include)
+    target_compile_options(test_hwmon_names PRIVATE -Wall -Wextra)
+    add_test(NAME hwmon_names COMMAND test_hwmon_names)
 
     # Boot slot + update verification/apply test. The test provides its own
     # playos_find_partition_by_label() seam, so mount.c is intentionally not
