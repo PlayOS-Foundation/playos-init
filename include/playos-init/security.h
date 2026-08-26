@@ -64,6 +64,7 @@ struct playos_landlock_paths {
     const char *dev_shm;      /* read-write (wl_shm)                   */
     const char *sys_dir;      /* read+list (sysfs, libdrm/Mesa)        */
     const char *asound_conf;  /* read, optional                        */
+    const char *alsa_share;   /* read+list+traverse (ALSA config tree) */
 };
 
 /* Apply a Landlock ruleset from explicit paths. Same return convention

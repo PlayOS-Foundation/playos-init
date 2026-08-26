@@ -270,6 +270,14 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
                                         LANDLOCK_ACCESS_FS_READ_FILE,
                                         p->asound_conf) != 0)
         goto fail;
+    /* ALSA's shared config tree (/usr/share/alsa/alsa.conf + cards/pcm/ctl/
+     * init). Without read+traverse here snd_pcm_open("default") fails with
+     * "cannot access file /usr/share/alsa/alsa.conf" because alsa-lib parses
+     * its whole config directory. Optional so zeroed structs (host tests)
+     * are a no-op. */
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_DEV_RO_DIR,
+                                        p->alsa_share) != 0)
+        goto fail;
 
     if (syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0)
         goto fail;
@@ -321,6 +329,7 @@ playos_security_apply_landlock(const char *game_id)
     p.dev_shm     = "/dev/shm";
     p.sys_dir     = "/sys";
     p.asound_conf = "/etc/asound.conf";
+    p.alsa_share  = "/usr/share/alsa";
 
     return playos_landlock_apply_ruleset(&p);
 }
