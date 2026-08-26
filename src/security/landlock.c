@@ -278,6 +278,17 @@ playos_landlock_apply_ruleset(const struct playos_landlock_paths *p)
     if (landlock_add_path_rule_optional(ruleset_fd, LL_DEV_RO_DIR,
                                         p->alsa_share) != 0)
         goto fail;
+    /* NSS config: ALSA's dmix plugin resolves its ipc_gid group name via
+     * getgrnam("audio"), which (under musl) reads /etc/group directly.
+     * Without read+traverse on /etc here, dmix errors "ipc_gid must be a
+     * valid group (create group audio)" and game audio fails even though
+     * /dev/snd and the ALSA config tree are already readable. Read-only
+     * (Landlock only restricts; Unix DAC still hides root-only files like
+     * /etc/shadow from uid 1001). Optional so zeroed structs (host tests)
+     * are a no-op. */
+    if (landlock_add_path_rule_optional(ruleset_fd, LL_DEV_RO_DIR,
+                                        p->etc_dir) != 0)
+        goto fail;
 
     if (syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0)
         goto fail;
@@ -330,6 +341,7 @@ playos_security_apply_landlock(const char *game_id)
     p.sys_dir     = "/sys";
     p.asound_conf = "/etc/asound.conf";
     p.alsa_share  = "/usr/share/alsa";
+    p.etc_dir     = "/etc";
 
     return playos_landlock_apply_ruleset(&p);
 }
