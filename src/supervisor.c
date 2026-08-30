@@ -648,6 +648,7 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	pid_t shell_pid = s->shell_pid;
 	pid_t overlay_pid = s->overlay_pid;
 	pid_t compositor_pid = s->compositor_pid;
+	pid_t ssh_pid = s->ssh_pid;
 
 	playos_supervisor_stop_shell_and_overlay(s);
 	/* The compositor also holds /data/log/compositor-stderr.log open, and
@@ -655,11 +656,20 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	playos_supervisor_stop_compositor(s);
 	playos_log_close_persistent(s);
 
+	/* SSH bring-up also logs to /data/log/ssh-bringup.log. */
+	if (ssh_pid > 0) {
+		playos_log_write(s, "sup", "stopping ssh-bringup PID %d for installer handoff",
+		                 ssh_pid);
+		kill(ssh_pid, SIGTERM);
+		s->ssh_pid = 0;
+	}
+
 	/* SIGTERM is async — wait for the children to actually die so their
 	 * /data/log/* fds are closed before umount. */
 	wait_child_exit(s, compositor_pid, 2000);
 	wait_child_exit(s, shell_pid, 2000);
 	wait_child_exit(s, overlay_pid, 2000);
+	wait_child_exit(s, ssh_pid, 2000);
 
 	int umount_ok = 1;
 	if (umount("/data") != 0 && errno != EINVAL) {
