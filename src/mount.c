@@ -884,6 +884,69 @@ int playos_find_partition_by_label(const char *label, char *device_path,
 
 /* ── Pivot into active A/B rootfs slot (Sprint 11.5) ─────────────── */
 
+static int
+playos_read_int_file(const char *path, int *out)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return -1;
+    int r = fscanf(f, "%d", out) == 1 ? 0 : -1;
+    fclose(f);
+    return r;
+}
+
+/* S13.7: scan removable whole disks for an ESP carrying the live-USB marker.
+ * init's ESP discovery may mount the internal NVMe's ESP first, so a USB boot
+ * on a machine with a previous install would otherwise never see the marker
+ * on the USB ESP and would wrongly pivot into the NVMe slot. */
+static int
+playos_removable_esp_has_live_marker(void)
+{
+    DIR *dir = opendir("/sys/block");
+    if (!dir)
+        return 0;
+
+    mkdir("/mnt/esp-check", 0755);
+    int found = 0;
+    struct dirent *e;
+    while (!found && (e = readdir(dir)) != NULL) {
+        const char *disk = e->d_name;
+        if (disk[0] == '.')
+            continue;
+        if (strncmp(disk, "loop", 4) == 0 || strncmp(disk, "ram", 3) == 0 ||
+            strncmp(disk, "zram", 4) == 0 || strncmp(disk, "dm-", 3) == 0)
+            continue;
+
+        char rb[192];
+        snprintf(rb, sizeof(rb), "/sys/block/%s/removable", disk);
+        int removable = 0;
+        if (playos_read_int_file(rb, &removable) != 0 || removable == 0)
+            continue;
+
+        char dpath[192];
+        snprintf(dpath, sizeof(dpath), "/sys/block/%s", disk);
+        DIR *pd = opendir(dpath);
+        if (!pd)
+            continue;
+        struct dirent *pe;
+        while (!found && (pe = readdir(pd)) != NULL) {
+            const char *part = pe->d_name;
+            if (strncmp(part, disk, strlen(disk)) != 0)
+                continue; /* only partition entries */
+            char dev[160];
+            snprintf(dev, sizeof(dev), "/dev/%s", part);
+            if (mount(dev, "/mnt/esp-check", "vfat", MS_RDONLY, NULL) != 0)
+                continue;
+            found = access("/mnt/esp-check/EFI/playos/live-usb", F_OK) == 0;
+            umount("/mnt/esp-check");
+        }
+        closedir(pd);
+    }
+    closedir(dir);
+    rmdir("/mnt/esp-check");
+    return found;
+}
+
 /*
  * Sprint 11.5: hand control from the initramfs to the real read-only
  * rootfs slot. Installed internal disks carry the active slot as a raw
@@ -923,6 +986,15 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         playos_log_write(s, "init",
                          "live USB marker present — staying in initramfs "
                          "(skip pivot to installed slot)");
+        return 1;
+    }
+
+    /* The internal NVMe ESP may have been mounted instead of the USB's.
+     * Scan removable disks' ESPs too so a USB boot is still recognized. */
+    if (playos_removable_esp_has_live_marker()) {
+        playos_log_write(s, "init",
+                         "live USB marker found on removable ESP — staying "
+                         "in initramfs (skip pivot to installed slot)");
         return 1;
     }
 
