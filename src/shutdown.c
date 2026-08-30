@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
+#include <errno.h>
 #include <sys/reboot.h>
 
 #include "playos-init/init.h"
@@ -103,13 +104,22 @@ void playos_shutdown(struct playos_init_state *s, int restart)
                      restart ? "RB_AUTOBOOT" : "RB_POWER_OFF");
     sync();
 
+    int rc;
     if (restart) {
-        reboot(RB_AUTOBOOT);
+        rc = reboot(RB_AUTOBOOT);
     } else {
-        reboot(RB_POWER_OFF);
+        rc = reboot(RB_POWER_OFF);
     }
 
-    /* If reboot fails, halt as fallback */
+    /* If reboot/power-off returns (i.e. did not complete), halt as fallback.
+     * Log the return value so a failed power-off is distinguishable from a
+     * clean one in /data/log/init.log. */
+    playos_log_write(s, "shutdown",
+                     "reboot(%s) returned %d (errno=%d %s) — falling back to RB_HALT_SYSTEM",
+                     restart ? "RB_AUTOBOOT" : "RB_POWER_OFF",
+                     rc,
+                     rc < 0 ? errno : 0,
+                     rc < 0 ? strerror(errno) : "none");
     reboot(RB_HALT_SYSTEM);
 
     /* Should never reach here */
