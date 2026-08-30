@@ -672,12 +672,17 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	wait_child_exit(s, ssh_pid, 2000);
 
 	int umount_ok = 1;
-	if (umount("/data") != 0 && errno != EINVAL) {
+	/* /data and /EFI live on the boot medium, never on the internal target
+	 * being repartitioned, so a busy mount can be safely detached after the
+	 * known /data log holders (shell/overlay/compositor/ssh/init) are gone. */
+	if (umount("/data") != 0 && errno != EINVAL &&
+	    umount2("/data", MNT_DETACH) != 0) {
 		playos_log_write(s, "sup", "runtime installer: umount /data failed: %s",
 		                 strerror(errno));
 		umount_ok = 0;
 	}
-	if (umount_ok && umount("/EFI") != 0 && errno != EINVAL) {
+	if (umount_ok && umount("/EFI") != 0 && errno != EINVAL &&
+	    umount2("/EFI", MNT_DETACH) != 0) {
 		playos_log_write(s, "sup", "runtime installer: umount /EFI failed: %s",
 		                 strerror(errno));
 		umount_ok = 0;
