@@ -616,6 +616,28 @@ void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
 	}
 }
 
+/* S13.7: wait for a SIGTERM'd child to actually exit (closes its /data fds)
+ * before trying to unmount /data. Bounded so a stuck child still aborts. */
+static void
+wait_child_exit(struct playos_init_state *s, pid_t pid, int timeout_ms)
+{
+	if (pid <= 0)
+		return;
+	int waited = 0;
+	while (waited < timeout_ms) {
+		int st;
+		pid_t r = waitpid(pid, &st, WNOHANG);
+		if (r == pid)
+			return;
+		if (r < 0 && errno == ECHILD)
+			return;
+		usleep(50000);
+		waited += 50;
+	}
+	playos_log_write(s, "sup", "child PID %d did not exit within %d ms",
+	                 pid, timeout_ms);
+}
+
 /* S13.7: shared runtime installer handoff used by both the StartInstaller IPC
  * handler and the headless playos.install.auto cmdline token. Returns 0 on
  * success (installer spawned, reboot-on-exit armed) or -1 on failure (shell +
@@ -623,11 +645,21 @@ void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
 int
 playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 {
+	pid_t shell_pid = s->shell_pid;
+	pid_t overlay_pid = s->overlay_pid;
+	pid_t compositor_pid = s->compositor_pid;
+
 	playos_supervisor_stop_shell_and_overlay(s);
 	/* The compositor also holds /data/log/compositor-stderr.log open, and
 	 * init holds /data/log/init.log; stop/close both so /data can unmount. */
 	playos_supervisor_stop_compositor(s);
 	playos_log_close_persistent(s);
+
+	/* SIGTERM is async — wait for the children to actually die so their
+	 * /data/log/* fds are closed before umount. */
+	wait_child_exit(s, compositor_pid, 2000);
+	wait_child_exit(s, shell_pid, 2000);
+	wait_child_exit(s, overlay_pid, 2000);
 
 	int umount_ok = 1;
 	if (umount("/data") != 0 && errno != EINVAL) {
