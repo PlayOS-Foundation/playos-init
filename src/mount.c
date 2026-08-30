@@ -432,28 +432,34 @@ static int find_data_on_disk(const char *root_disk, char *device_path,
     return 0;
 }
 
-/* The internal install target is always NVMe (/dev/nvme0n1) or eMMC
- * (/dev/mmcblk0). In installer mode the data partition must come from the
- * removable/external media (the USB stick), never the internal install
- * target, so we reject NVMe/eMMC outright instead of trusting the
- * possibly-unreliable /sys/block/<disk>/removable flag. */
-static int device_is_internal(const char *dev_path)
-{
-    const char *base = strrchr(dev_path, '/');
-    base = base ? base + 1 : dev_path;
-    return (strncmp(base, "nvme", 4) == 0) ||
-           (strncmp(base, "mmcblk", 6) == 0);
-}
-
-/* Return non-zero when a candidate data partition should be used
- * immediately. Normal boots prefer removable media; installer boots
- * require the device not be an internal NVMe/eMMC target. */
+/* Return non-zero when a candidate data partition should be preferred.
+ *
+ * Both normal and installer boots prefer a genuinely removable device — the
+ * USB stick / boot medium — over a fixed internal disk. The sysfs
+ * `removable` flag is the exact same signal the installer uses
+ * (playos_disk_enumerate skips removable != 0 when choosing install
+ * targets), so keeping the two consistent means a leftover playos-data
+ * partition on an internal SATA/NVMe/eMMC disk can never hijack /data.
+ *
+ * `require_removable` does not change the preference test: it only governs
+ * whether find_data_partition() may later fall back to a fixed disk
+ * (normal boot) or must fail closed (installer boot). */
 static int data_partition_is_preferred(const char *dev_path,
                                        int require_removable)
 {
+    if (device_is_removable(dev_path))
+        return 1;
+
+    /* In installer mode a non-removable candidate is a leftover playos-data
+     * partition on the internal install target. Name it loudly so a future
+     * EBUSY-style failure is self-explanatory instead of silent. */
     if (require_removable)
-        return !device_is_internal(dev_path);
-    return device_is_removable(dev_path);
+        dprintf(STDERR_FILENO,
+                "playos-init: installer mode: ignoring playos-data on "
+                "internal/install-target disk %s (not the boot medium)\n",
+                dev_path);
+
+    return 0;
 }
 
 static int find_data_partition(char *device_path, size_t path_size,
