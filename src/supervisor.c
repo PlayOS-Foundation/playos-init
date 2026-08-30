@@ -671,6 +671,28 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	wait_child_exit(s, overlay_pid, 2000);
 	wait_child_exit(s, ssh_pid, 2000);
 
+	/* S13.7: preserve the dev SSH key before /data is unmounted. A lazy
+	 * MNT_DETACH can leave the USB playos-data superblock busy, so the
+	 * installer cannot mount it to re-read the key; /tmp is shared with the
+	 * installer child and survives the unmount. */
+	{
+		FILE *key_in = fopen("/data/ssh/authorized_keys", "r");
+		if (key_in) {
+			int key_out = open("/tmp/playos-install-authorized_keys",
+			                   O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+			if (key_out >= 0) {
+				char buf[4096];
+				size_t n;
+				while ((n = fread(buf, 1, sizeof(buf), key_in)) > 0)
+					(void)write(key_out, buf, n);
+				close(key_out);
+				playos_log_write(s, "sup",
+				                 "installer SSH key preserved to /tmp");
+			}
+			fclose(key_in);
+		}
+	}
+
 	int umount_ok = 1;
 	/* /data and /EFI live on the boot medium, never on the internal target
 	 * being repartitioned, so a busy mount can be safely detached after the
