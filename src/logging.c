@@ -119,7 +119,6 @@ void playos_log_open_persistent(struct playos_init_state *s)
 {
     if (s->log_fd_persistent >= 0)
         return; /* already open */
-
     int fd = open("/data/log/init.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
         dprintf(STDERR_FILENO,
@@ -133,6 +132,16 @@ void playos_log_open_persistent(struct playos_init_state *s)
 
     /* Preserve the early-boot trace already held in the ring buffer. */
     ring_flush_to_fd(s, fd);
+}
+
+/* S13.7: close the persistent /data/log/init.log fd before unmounting /data
+ * so the runtime installer handoff does not hit EBUSY. */
+void playos_log_close_persistent(struct playos_init_state *s)
+{
+    if (s->log_fd_persistent >= 0) {
+        close(s->log_fd_persistent);
+        s->log_fd_persistent = -1;
+    }
 }
 
 void playos_log_write(struct playos_init_state *s, const char *tag,

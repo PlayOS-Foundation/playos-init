@@ -157,5 +157,6 @@ void playos_init_state_init(struct playos_init_state *s);
 /* ── Logging ─────────────────────────────────────────────────────── */
 
 void playos_log_open_persistent(struct playos_init_state *s);
+void playos_log_close_persistent(struct playos_init_state *s);
 
 #endif /* PLAYOS_INIT_H */

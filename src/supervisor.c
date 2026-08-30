@@ -624,6 +624,10 @@ int
 playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 {
 	playos_supervisor_stop_shell_and_overlay(s);
+	/* The compositor also holds /data/log/compositor-stderr.log open, and
+	 * init holds /data/log/init.log; stop/close both so /data can unmount. */
+	playos_supervisor_stop_compositor(s);
+	playos_log_close_persistent(s);
 
 	int umount_ok = 1;
 	if (umount("/data") != 0 && errno != EINVAL) {
@@ -639,16 +643,34 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 
 	if (!umount_ok) {
 		playos_log_write(s, "sup",
-		                 "runtime installer aborted — respawning shell/overlay");
+		                 "runtime installer aborted — respawning compositor/shell/overlay");
 		s->installer_runtime_mode = 0;
+		playos_supervisor_spawn_compositor(s);
 		playos_supervisor_spawn_shell(s);
 		playos_supervisor_spawn_overlay(s);
+		playos_log_open_persistent(s);
 		return -1;
 	}
 
 	s->installer_runtime_mode = 1;
+	/* Fresh compositor without any /data fds, then the installer client. */
+	playos_supervisor_spawn_compositor(s);
+	usleep(500000);
 	playos_supervisor_spawn_installer(s);
 	return 0;
+}
+
+/* S13.7: stop the compositor before a runtime installer handoff so its
+ * /data/log/compositor-stderr.log fd no longer pins /data. */
+void
+playos_supervisor_stop_compositor(struct playos_init_state *s)
+{
+	if (s->compositor_pid > 0) {
+		playos_log_write(s, "sup", "stopping compositor PID %d for installer handoff",
+		                 s->compositor_pid);
+		kill(s->compositor_pid, SIGTERM);
+		s->compositor_pid = 0;
+	}
 }
 
 /* ── Developer SSH supervision (Sprint 11.6) ─────────────────────── */
