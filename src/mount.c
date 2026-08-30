@@ -756,6 +756,11 @@ int playos_install_mode_requested(void)
     return playos_cmdline_has_flag("playos.mode=install");
 }
 
+int playos_auto_install_requested(void)
+{
+    return playos_cmdline_has_flag("playos.install.auto");
+}
+
 /* ── A/B boot slot partition lookup (Sprint 11) ───────────────────── */
 
 /*

@@ -300,6 +300,19 @@ int main(void)
 #endif /* PLAYOS_ENABLE_IPC_TESTS */
         }
 
+        /* S13.7: headless runtime installer handoff (QEMU/CI automation).
+         * Triggered once the compositor is running; uses the exact same
+         * supervisor path as the StartInstaller IPC message. */
+        static int auto_install_triggered = 0;
+        if (!auto_install_triggered && !s->install_mode &&
+            playos_auto_install_requested() &&
+            s->compositor_state == COMPOSITOR_RUNNING) {
+            auto_install_triggered = 1;
+            playos_log_write(s, "init",
+                             "auto-install requested — starting runtime installer handoff");
+            playos_supervisor_start_runtime_installer(s);
+        }
+
         /* Process incoming IPC connections */
         playos_ipc_server_poll(s);
         playos_compositor_server_poll(s);

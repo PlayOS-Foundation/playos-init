@@ -14,6 +14,7 @@
 #include <time.h>
 #include <sys/wait.h>
 #include <sys/reboot.h>
+#include <sys/mount.h>
 #include <fcntl.h>
 
 #include "playos-init/init.h"
@@ -613,6 +614,41 @@ void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
 		kill(s->shell_pid, SIGTERM);
 		s->shell_pid = 0;
 	}
+}
+
+/* S13.7: shared runtime installer handoff used by both the StartInstaller IPC
+ * handler and the headless playos.install.auto cmdline token. Returns 0 on
+ * success (installer spawned, reboot-on-exit armed) or -1 on failure (shell +
+ * overlay respawned, live session kept). */
+int
+playos_supervisor_start_runtime_installer(struct playos_init_state *s)
+{
+	playos_supervisor_stop_shell_and_overlay(s);
+
+	int umount_ok = 1;
+	if (umount("/data") != 0 && errno != EINVAL) {
+		playos_log_write(s, "sup", "runtime installer: umount /data failed: %s",
+		                 strerror(errno));
+		umount_ok = 0;
+	}
+	if (umount_ok && umount("/EFI") != 0 && errno != EINVAL) {
+		playos_log_write(s, "sup", "runtime installer: umount /EFI failed: %s",
+		                 strerror(errno));
+		umount_ok = 0;
+	}
+
+	if (!umount_ok) {
+		playos_log_write(s, "sup",
+		                 "runtime installer aborted — respawning shell/overlay");
+		s->installer_runtime_mode = 0;
+		playos_supervisor_spawn_shell(s);
+		playos_supervisor_spawn_overlay(s);
+		return -1;
+	}
+
+	s->installer_runtime_mode = 1;
+	playos_supervisor_spawn_installer(s);
+	return 0;
 }
 
 /* ── Developer SSH supervision (Sprint 11.6) ─────────────────────── */

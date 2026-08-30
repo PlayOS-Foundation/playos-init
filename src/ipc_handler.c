@@ -327,39 +327,12 @@ static int handle_message(struct playos_init_state *s, int client_fd,
             return 0;
         }
 
-        /* Stop the live shell + overlay first (closes their /data/log fds). */
-        playos_supervisor_stop_shell_and_overlay(s);
-
-        /* Tear down writable mounts so the target disk is not busy. */
-        int umount_ok = 1;
-        if (umount("/data") != 0 && errno != EINVAL) {
-            playos_log_write(s, "ipc", "StartInstaller: umount /data failed: %s",
-                             strerror(errno));
-            umount_ok = 0;
-        }
-        if (umount_ok && umount("/EFI") != 0 && errno != EINVAL) {
-            playos_log_write(s, "ipc", "StartInstaller: umount /EFI failed: %s",
-                             strerror(errno));
-            umount_ok = 0;
-        }
-
-        if (!umount_ok) {
-            /* Abort cleanly: respawn shell + overlay, keep the live session. */
-            playos_log_write(s, "ipc",
-                             "StartInstaller aborted — respawning shell/overlay");
-            s->installer_runtime_mode = 0;
-            playos_supervisor_spawn_shell(s);
-            playos_supervisor_spawn_overlay(s);
+        /* Shared runtime handoff: stop shell+overlay, unmount /data+/EFI,
+         * spawn installer (or respawn shell+overlay and error). */
+        if (playos_supervisor_start_runtime_installer(s) == 0)
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
+        else
             send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ERROR);
-            playos_ipc_message_free(&msg);
-            return 0;
-        }
-
-        /* Commit to the handoff: spawn the installer under supervision and
-         * reboot on its exit (supervisor checks installer_runtime_mode). */
-        s->installer_runtime_mode = 1;
-        playos_supervisor_spawn_installer(s);
-        send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
         playos_ipc_message_free(&msg);
         return 0;
     }
