@@ -914,6 +914,18 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         return 1;
     }
 
+    /* Live-USB marker (S13.7): the image gen scripts stamp the removable
+     * ESP with EFI/playos/live-usb. A machine with a previously-installed
+     * internal PlayOS also carries a raw-squashfs playos-a slot; without
+     * this check a USB boot would pivot into that NVMe slot and silently
+     * boot the installed system instead of the live session. */
+    if (s->efi_mounted && access("/EFI/playos/live-usb", F_OK) == 0) {
+        playos_log_write(s, "init",
+                         "live USB marker present — staying in initramfs "
+                         "(skip pivot to installed slot)");
+        return 1;
+    }
+
     /* If / is already squashfs, we are the exec'd init inside the real
      * root and there is nothing left to pivot. */
     FILE *mounts = fopen("/proc/mounts", "r");
