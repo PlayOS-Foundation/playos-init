@@ -102,6 +102,7 @@ struct playos_init_state {
     pid_t                     installer_pid;
     struct playos_restart_info installer_restarts;
     int                       install_mode;        /* booted with playos.mode=install */
+    int                       installer_runtime_mode; /* S13.7: started via StartInstaller IPC */
 
     /* Developer SSH supervision (Sprint 11.6) */
     pid_t                     ssh_pid;

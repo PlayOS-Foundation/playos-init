@@ -18,6 +18,7 @@
 
 #include "playos-init/init.h"
 #include "playos-init/supervisor.h"
+#include "playos-init/shutdown.h"
 #include "playos-init/mount.h"
 #include "playos-init/ipc_handler.h"
 #include "playos-init/security.h"
@@ -340,6 +341,11 @@ void playos_supervisor_shell_exited(struct playos_init_state *s,
 
     s->shell_pid = 0;
 
+    /* S13.7: during a runtime installer handoff the shell was stopped on
+     * purpose — do not restart it. */
+    if (s->installer_runtime_mode)
+        return;
+
     /* Check restart policy */
     if (shell_should_restart(s)) {
         shell_restart(s);
@@ -470,6 +476,10 @@ void playos_supervisor_overlay_exited(struct playos_init_state *s,
 
 	s->overlay_pid = 0;
 
+	/* S13.7: runtime installer handoff — do not restart the overlay. */
+	if (s->installer_runtime_mode)
+		return;
+
 	if (overlay_should_restart(s)) {
 		overlay_restart(s);
 	} else {
@@ -561,6 +571,15 @@ void playos_supervisor_installer_exited(struct playos_init_state *s,
 
 	s->installer_pid = 0;
 
+	/* S13.7: a Settings-triggered install reboots into the installed OS;
+	 * the boot-time installer keeps the restart policy for QEMU automation. */
+	if (s->installer_runtime_mode) {
+		playos_log_write(s, "sup",
+		                 "runtime installer finished (code=%d) — rebooting",
+		                 exit_code);
+		playos_shutdown(s, 1); /* never returns */
+	}
+
 	if (installer_should_restart(s)) {
 		installer_restart(s);
 	} else {
@@ -575,6 +594,25 @@ void playos_supervisor_installer_exited(struct playos_init_state *s,
 void playos_supervisor_spawn_installer(struct playos_init_state *s)
 {
 	spawn_installer(s);
+}
+
+/* S13.7: stop the live shell + overlay before a runtime installer handoff.
+ * Zeroing the pids makes the pending SIGCHLD reaps go to the "unknown child"
+ * path, so their restart policies never respawn them. */
+void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
+{
+	if (s->overlay_pid > 0) {
+		playos_log_write(s, "sup", "stopping overlay PID %d for installer handoff",
+		                 s->overlay_pid);
+		kill(s->overlay_pid, SIGTERM);
+		s->overlay_pid = 0;
+	}
+	if (s->shell_pid > 0) {
+		playos_log_write(s, "sup", "stopping shell PID %d for installer handoff",
+		                 s->shell_pid);
+		kill(s->shell_pid, SIGTERM);
+		s->shell_pid = 0;
+	}
 }
 
 /* ── Developer SSH supervision (Sprint 11.6) ─────────────────────── */

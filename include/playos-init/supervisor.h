@@ -62,6 +62,7 @@ void playos_supervisor_overlay_exited(struct playos_init_state *s,
 
 /* Launch the PlayOS installer as a Wayland client (Sprint 10) */
 void playos_supervisor_spawn_installer(struct playos_init_state *s);
+void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s);
 
 /* Handle installer exit. Restarts if within limits. */
 void playos_supervisor_installer_exited(struct playos_init_state *s,

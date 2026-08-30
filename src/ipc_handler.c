@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
 #include <poll.h>
 #include <dirent.h>
 #include <limits.h>
@@ -195,6 +196,24 @@ static int rmtree(const char *path)
     return 0;
 }
 
+/* Send a minimal framed ack with the given message type (S13.7 helper). */
+static void
+send_simple_ack(int client_fd, const char *type)
+{
+    char ack_json[160];
+    int ack_len = snprintf(ack_json, sizeof(ack_json),
+        "{\"v\":%d,\"type\":\"%s\"}",
+        PLAYOS_IPC_PROTOCOL_VERSION, type);
+    struct playos_ipc_frame *ack_frame = malloc(sizeof(*ack_frame) + (size_t)ack_len);
+    if (!ack_frame)
+        return;
+    ack_frame->magic = PLAYOS_IPC_MAGIC;
+    ack_frame->length = (uint32_t)ack_len;
+    memcpy(ack_frame->body, ack_json, (size_t)ack_len);
+    (void)!write(client_fd, ack_frame, sizeof(*ack_frame) + (size_t)ack_len);
+    free(ack_frame);
+}
+
 /*
  * Handle an incoming IPC message from a client.
  * Returns 0 to keep the connection open, -1 to close it.
@@ -295,6 +314,54 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         /* Orderly reboot (never returns). */
         playos_shutdown(s, 1);
         return -1;
+    }
+
+    /* ── StartInstaller (Sprint 13.7) ───────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_START_INSTALLER) == 0) {
+        playos_log_write(s, "ipc", "StartInstaller requested via IPC");
+
+        if (s->install_mode) {
+            /* Boot-time installer already running: ack, no-op. */
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
+        /* Stop the live shell + overlay first (closes their /data/log fds). */
+        playos_supervisor_stop_shell_and_overlay(s);
+
+        /* Tear down writable mounts so the target disk is not busy. */
+        int umount_ok = 1;
+        if (umount("/data") != 0 && errno != EINVAL) {
+            playos_log_write(s, "ipc", "StartInstaller: umount /data failed: %s",
+                             strerror(errno));
+            umount_ok = 0;
+        }
+        if (umount_ok && umount("/EFI") != 0 && errno != EINVAL) {
+            playos_log_write(s, "ipc", "StartInstaller: umount /EFI failed: %s",
+                             strerror(errno));
+            umount_ok = 0;
+        }
+
+        if (!umount_ok) {
+            /* Abort cleanly: respawn shell + overlay, keep the live session. */
+            playos_log_write(s, "ipc",
+                             "StartInstaller aborted — respawning shell/overlay");
+            s->installer_runtime_mode = 0;
+            playos_supervisor_spawn_shell(s);
+            playos_supervisor_spawn_overlay(s);
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ERROR);
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
+        /* Commit to the handoff: spawn the installer under supervision and
+         * reboot on its exit (supervisor checks installer_runtime_mode). */
+        s->installer_runtime_mode = 1;
+        playos_supervisor_spawn_installer(s);
+        send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
+        playos_ipc_message_free(&msg);
+        return 0;
     }
 
     /* ── LaunchGame ─────────────────────────────────────────── */
