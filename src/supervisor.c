@@ -658,6 +658,20 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	pid_t compositor_pid = s->compositor_pid;
 	pid_t ssh_pid = s->ssh_pid;
 
+	/* S14-T10: seamless, console-free handoff. Suppress kernel console
+	 * output (console_loglevel 0) and blank the visible VT so no raw
+	 * dmesg/init lines appear between the shell and the installer UI. */
+	FILE *printk = fopen("/proc/sys/kernel/printk", "w");
+	if (printk) {
+		fprintf(printk, "0 4 1 7\n");
+		fclose(printk);
+	}
+	int tty = open("/dev/tty0", O_WRONLY | O_NOCTTY);
+	if (tty >= 0) {
+		write(tty, "\033[2J\033[H", 7);
+		close(tty);
+	}
+
 	playos_supervisor_stop_shell_and_overlay(s);
 	/* The compositor also holds /data/log/compositor-stderr.log open, and
 	 * init holds /data/log/init.log; stop/close both so /data can unmount. */
