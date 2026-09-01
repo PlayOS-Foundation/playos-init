@@ -28,6 +28,7 @@ set(PLAYOS_INIT_SOURCES
     src/audio_debug.c
     src/thermal.c
     src/hwmon_names.c
+    src/recovery.c
     src/sha256.c
     src/boot_slot.c
     src/update.c
@@ -51,6 +52,7 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/supervisor.h
     include/playos-init/shutdown.h
     include/playos-init/thermal.h
+    include/playos-init/recovery.h
     include/playos-init/boot_slot.h
     include/playos-init/update.h
     include/playos-init/sha256.h

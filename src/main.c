@@ -28,6 +28,7 @@
 #include "playos-init/supervisor.h"
 #include "playos-init/ipc_handler.h"
 #include "playos-init/thermal.h"
+#include "playos-init/recovery.h"
 
 /* ── Global state ────────────────────────────────────────────────── */
 
@@ -90,6 +91,13 @@ int main(void)
      * their final ownership/group/mode (render, audio, input, ...) before
      * the compositor and games start. Best-effort, never hard-fails boot. */
     playos_udev_start(s);
+
+    /* S14-T6: recovery via holding Volume Down for 5 seconds at boot. */
+    if (playos_recovery_button_held()) {
+        s->recovery_mode = 1;
+        playos_log_write(s, "init",
+                         "recovery requested via button hold (volume down)");
+    }
 
     /* Sprint 10: detect installer boot before data-mount policy decisions. */
     s->install_mode = playos_install_mode_requested();
