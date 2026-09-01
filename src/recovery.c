@@ -6,6 +6,7 @@
  * delayed: if volume-down is not already held when init reaches this check,
  * we return immediately.
  */
+#define _DEFAULT_SOURCE 1
 #include "playos-init/recovery.h"
 
 #include <dirent.h>
