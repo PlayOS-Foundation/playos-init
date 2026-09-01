@@ -34,6 +34,9 @@ int playos_install_mode_requested(void);
 /* True when booted with playos.install.auto (headless runtime install). */
 int playos_auto_install_requested(void);
 
+/* True when booted with playos.recovery (recovery UI requested). */
+int playos_recovery_requested(void);
+
 /* Locate a GPT partition by its UTF-16LE name label (e.g. "ESP",
  * "playos-a"). Fills device_path with the /dev/ node and returns 0, or
  * -1 if no such partition is found. */

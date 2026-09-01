@@ -264,10 +264,16 @@ void playos_supervisor_compositor_exited(struct playos_init_state *s,
         compositor_restart(s);
     } else {
         playos_log_write(s, "sup",
-                         "compositor restart limit exceeded (%d restarts in %ds)",
+                         "compositor restart limit exceeded (%d restarts in %ds) — recovery UI",
                          PLAYOS_COMPOSITOR_MAX_RESTARTS,
                          PLAYOS_COMPOSITOR_WINDOW_S);
-        playos_enter_recovery(s, "compositor restart limit exceeded");
+        s->recovery_mode = 1;
+        if (playos_supervisor_spawn_compositor(s) == 0) {
+            usleep(500000);
+            playos_supervisor_spawn_shell(s);
+        } else {
+            playos_enter_recovery(s, "compositor restart limit exceeded");
+        }
     }
 }
 
@@ -381,6 +387,8 @@ static void spawn_shell(struct playos_init_state *s)
 		/* Child: same Wayland env as compositor */
 		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
 		setenv("WAYLAND_DISPLAY", "playos-0", 1);
+		if (s->recovery_mode)
+			setenv("PLAYOS_RECOVERY", "1", 1);
 
 		/* Persist shell stderr (EGL/Wayland errors, fps) to /data */
 		child_log_redirect("/data/log/shell-stderr.log");

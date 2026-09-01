@@ -65,6 +65,12 @@ int main(void)
     /* PID 1 must not exit normally */
     playos_init_state_init(s);
 
+    /* S14-T6: recovery UI requested on the kernel cmdline. */
+    if (playos_recovery_requested()) {
+        s->recovery_mode = 1;
+        playos_log_write(s, "init", "recovery requested via cmdline (playos.recovery)");
+    }
+
     print_banner();
 
     /* Stage 1: Mount virtual filesystems */
@@ -206,15 +212,15 @@ int main(void)
             playos_log_write(s, "init",
                              "installer mode: data partition optional — continuing");
         } else {
-            playos_log_write(s, "init", "WARN: data partition not found — provisioning halt");
-            playos_enter_recovery(s, "data partition not found");
+            playos_log_write(s, "init", "WARN: data partition not found — recovery UI");
+            s->recovery_mode = 1;
         }
     } else {
         playos_boot_stage_write(BOOT_STAGE_DATA_MOUNTED);
         if (playos_data_create_dirs() != 0) {
             playos_log_write(s, "init",
-                    "ERROR: /data provisioning failed — halting");
-            playos_enter_recovery(s, "data provisioning failed");
+                    "ERROR: /data provisioning failed — recovery UI");
+            s->recovery_mode = 1;
         }
         /* /data/log now exists — persist the boot trace to the USB. */
         playos_log_open_persistent(s);
@@ -258,7 +264,8 @@ int main(void)
             playos_supervisor_spawn_installer(s);
         } else {
             playos_supervisor_spawn_shell(s);
-            playos_supervisor_spawn_overlay(s);
+            if (!s->recovery_mode)
+                playos_supervisor_spawn_overlay(s);
         }
     }
 
