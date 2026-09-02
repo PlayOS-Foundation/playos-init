@@ -259,6 +259,16 @@ int main(void)
     /* Stage 3b: Thermal thresholds + EPP profile sync (Sprint 9) */
     playos_thermal_init(s);
 
+    /* S14-T6: late recovery check. The early check right after udev can miss
+     * the ROG Ally internal controller before it enumerates, so re-check now
+     * that input devices are settled — this catches a START+SELECT / volume
+     * hold that began at power-on. */
+    if (!s->recovery_mode && playos_recovery_button_held()) {
+        s->recovery_mode = 1;
+        playos_log_write(s, "init",
+                         "recovery requested via button hold (late check)");
+    }
+
     /* Stage 4: Spawn compositor */
     playos_boot_stage_write(BOOT_STAGE_COMPOSITOR);
     if (playos_supervisor_spawn_compositor(s) != 0) {
