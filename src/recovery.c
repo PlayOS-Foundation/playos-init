@@ -157,10 +157,15 @@ playos_recovery_button_watch(int listen_ms)
         int fd = -1;
         const struct trigger *tr = NULL;
         if (find_held_trigger(&fd, &tr) == 0) {
+            dprintf(STDERR_FILENO,
+                    "\n[recovery] %s held - KEEP HOLDING (%.1fs)...\n",
+                    tr->name, (double)tr->hold_ms / 1000.0);
             int held = confirm_hold(fd, tr);
             close(fd);
             if (held)
                 return 1;
+            dprintf(STDERR_FILENO,
+                    "[recovery] released too early - keep watching\n");
             /* Released early — keep watching for a fresh press. */
         }
         clock_gettime(CLOCK_MONOTONIC, &ts);

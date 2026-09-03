@@ -263,10 +263,15 @@ int main(void)
      * the ROG Ally internal controller before it enumerates, so re-check now
      * that input devices are settled — this catches a START+SELECT / volume
      * hold that began at power-on. A 4s watch window also catches holds that
-     * start a moment after this point in boot. */
+     * start a moment after this point in boot. Console prompts give the user
+     * feedback so they know when to hold and when it was detected. */
     if (!s->recovery_mode) {
+        dprintf(STDERR_FILENO,
+                "\n[recovery] Hold START+SELECT for 2s to enter recovery...\n");
         if (playos_recovery_button_watch(4000)) {
             s->recovery_mode = 1;
+            dprintf(STDERR_FILENO,
+                    "[recovery] DETECTED - entering recovery mode\n");
             playos_log_write(s, "init",
                              "recovery requested via button hold (late watch)");
         }
