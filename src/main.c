@@ -381,13 +381,6 @@ int main(void)
         }
 
         /*
-         * Check recovery flag set by IPC handler or supervisor
-         */
-        if (s->recovery_mode) {
-            playos_enter_recovery(s, "shutdown requested via IPC");
-        }
-
-        /*
          * Sleep briefly to avoid busy-waiting.
          * SIGCHLD or IPC activity will wake us.
          */
