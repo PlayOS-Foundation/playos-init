@@ -4,15 +4,16 @@
  * Detects a held-button recovery request by reading evdev key state directly
  * from /dev/input during early boot. Triggers:
  *
+ *   - Gamepad START + SELECT held 5 s   (primary trigger on ROG Ally — the
+ *                             firmware never sees the internal controller)
  *   - Volume Up held 5 s
  *   - Volume Down held 5 s   (on ROG Ally the firmware captures Vol-Down at
  *                             power-on and enters BIOS, so this only works on
  *                             devices whose firmware does not intercept it)
- *   - Gamepad START + SELECT held 5 s   (primary trigger on ROG Ally — the
- *                             firmware never sees the internal controller)
  *
- * Normal boots are not delayed: if no trigger is already held when init
- * reaches this check, we return immediately.
+ * Normal boots are not delayed by the instant check; the late watch adds a
+ * bounded listen window so a hold that starts slightly after boot begins is
+ * still caught.
  */
 #define _DEFAULT_SOURCE 1
 #include "playos-init/recovery.h"
@@ -24,14 +25,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define RECOVERY_HOLD_MS 5000
-#define RECOVERY_POLL_STEPS 50 /* 50 x 100ms = 5s */
+#define RECOVERY_HOLD_STEPS 50 /* 50 x 100ms = 5s */
+#define RECOVERY_POLL_MS 100
 
+static const unsigned int trigger_gamepad[] = { BTN_SELECT, BTN_START };
 static const unsigned int trigger_volume_up[] = { KEY_VOLUMEUP };
 static const unsigned int trigger_volume_down[] = { KEY_VOLUMEDOWN };
-static const unsigned int trigger_gamepad[] = { BTN_SELECT, BTN_START };
 
 struct trigger {
     const unsigned int *keys;
@@ -40,9 +43,9 @@ struct trigger {
 };
 
 static const struct trigger triggers[] = {
+    { trigger_gamepad,     2, "start+select" },
     { trigger_volume_up,   1, "volume up" },
     { trigger_volume_down, 1, "volume down" },
-    { trigger_gamepad,     2, "start+select" },
 };
 
 static int
@@ -73,16 +76,16 @@ evdev_keys_down(int fd, const unsigned int *keys, int count)
     return 1;
 }
 
-int
-playos_recovery_button_held(void)
+/* Scan /dev/input for a device that has a recovery trigger currently held.
+ * On success returns the open fd and fills *out_tr; caller closes fd. */
+static int
+find_held_trigger(int *out_fd, const struct trigger **out_tr)
 {
-    /* Fast pre-check: a trigger must already be held at boot. This keeps
-     * normal boots free of any added delay. */
     DIR *dir = opendir("/dev/input");
     if (!dir)
-        return 0;
+        return -1;
 
-    int fd = -1;
+    int found_fd = -1;
     const struct trigger *found = NULL;
     struct dirent *e;
     while ((e = readdir(dir)) != NULL) {
@@ -98,29 +101,71 @@ playos_recovery_button_held(void)
             const struct trigger *tr = &triggers[t];
             if (evdev_supports_keys(f, tr->keys, tr->count) &&
                 evdev_keys_down(f, tr->keys, tr->count)) {
-                fd = f;
+                found_fd = f;
                 found = tr;
                 break;
             }
         }
-        if (fd >= 0)
+        if (found_fd >= 0)
             break;
         close(f);
     }
     closedir(dir);
 
-    if (fd < 0 || found == NULL)
-        return 0;
+    if (found_fd < 0 || found == NULL)
+        return -1;
+    *out_fd = found_fd;
+    *out_tr = found;
+    return 0;
+}
 
-    /* Hold window: require the same trigger to stay pressed for 5 s. */
-    int held = 1;
-    for (int i = 0; i < RECOVERY_POLL_STEPS; i++) {
-        usleep(RECOVERY_HOLD_MS / RECOVERY_POLL_STEPS * 1000);
-        if (!evdev_keys_down(fd, found->keys, found->count)) {
-            held = 0;
-            break;
-        }
+/* Require the trigger to stay held for RECOVERY_HOLD_MS. */
+static int
+confirm_hold(int fd, const struct trigger *tr)
+{
+    for (int i = 0; i < RECOVERY_HOLD_STEPS; i++) {
+        usleep(RECOVERY_HOLD_MS / RECOVERY_HOLD_STEPS * 1000);
+        if (!evdev_keys_down(fd, tr->keys, tr->count))
+            return 0;
     }
+    return 1;
+}
+
+int
+playos_recovery_button_held(void)
+{
+    int fd = -1;
+    const struct trigger *tr = NULL;
+    if (find_held_trigger(&fd, &tr) != 0)
+        return 0;
+    int held = confirm_hold(fd, tr);
     close(fd);
     return held;
+}
+
+int
+playos_recovery_button_watch(int listen_ms)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long long deadline_ms = (long long)ts.tv_sec * 1000 +
+                            ts.tv_nsec / 1000000 + listen_ms;
+
+    while (1) {
+        int fd = -1;
+        const struct trigger *tr = NULL;
+        if (find_held_trigger(&fd, &tr) == 0) {
+            int held = confirm_hold(fd, tr);
+            close(fd);
+            if (held)
+                return 1;
+            /* Released early — keep watching for a fresh press. */
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long long now_ms = (long long)ts.tv_sec * 1000 +
+                           ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            return 0;
+        usleep(RECOVERY_POLL_MS * 1000);
+    }
 }
