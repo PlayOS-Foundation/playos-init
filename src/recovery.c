@@ -28,8 +28,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define RECOVERY_HOLD_MS 5000
-#define RECOVERY_HOLD_STEPS 50 /* 50 x 100ms = 5s */
+#define RECOVERY_HOLD_MS 5000    /* default (volume triggers) */
+#define RECOVERY_GAMEPAD_HOLD_MS 2000 /* START+SELECT is unambiguous at boot */
 #define RECOVERY_POLL_MS 100
 
 static const unsigned int trigger_gamepad[] = { BTN_SELECT, BTN_START };
@@ -39,13 +39,14 @@ static const unsigned int trigger_volume_down[] = { KEY_VOLUMEDOWN };
 struct trigger {
     const unsigned int *keys;
     int count;
+    int hold_ms;
     const char *name;
 };
 
 static const struct trigger triggers[] = {
-    { trigger_gamepad,     2, "start+select" },
-    { trigger_volume_up,   1, "volume up" },
-    { trigger_volume_down, 1, "volume down" },
+    { trigger_gamepad,     2, RECOVERY_GAMEPAD_HOLD_MS, "start+select" },
+    { trigger_volume_up,   1, RECOVERY_HOLD_MS,         "volume up" },
+    { trigger_volume_down, 1, RECOVERY_HOLD_MS,         "volume down" },
 };
 
 static int
@@ -119,12 +120,13 @@ find_held_trigger(int *out_fd, const struct trigger **out_tr)
     return 0;
 }
 
-/* Require the trigger to stay held for RECOVERY_HOLD_MS. */
+/* Require the trigger to stay held for its hold_ms duration. */
 static int
 confirm_hold(int fd, const struct trigger *tr)
 {
-    for (int i = 0; i < RECOVERY_HOLD_STEPS; i++) {
-        usleep(RECOVERY_HOLD_MS / RECOVERY_HOLD_STEPS * 1000);
+    int steps = tr->hold_ms / RECOVERY_POLL_MS;
+    for (int i = 0; i < steps; i++) {
+        usleep(RECOVERY_POLL_MS * 1000);
         if (!evdev_keys_down(fd, tr->keys, tr->count))
             return 0;
     }

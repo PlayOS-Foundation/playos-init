@@ -262,10 +262,10 @@ int main(void)
     /* S14-T6: late recovery check. The early check right after udev can miss
      * the ROG Ally internal controller before it enumerates, so re-check now
      * that input devices are settled — this catches a START+SELECT / volume
-     * hold that began at power-on. A 3s watch window also catches holds that
+     * hold that began at power-on. A 4s watch window also catches holds that
      * start a moment after this point in boot. */
     if (!s->recovery_mode) {
-        if (playos_recovery_button_watch(3000)) {
+        if (playos_recovery_button_watch(4000)) {
             s->recovery_mode = 1;
             playos_log_write(s, "init",
                              "recovery requested via button hold (late watch)");
