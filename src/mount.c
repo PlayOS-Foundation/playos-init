@@ -1169,12 +1169,21 @@ int playos_mount_data(struct playos_init_state *state)
 {
     char device_path[256] = {0};
 
+    /* S13.7/S14 fix: when booting from a live USB (live-USB marker present on
+     * the mounted ESP), /data must be a *removable* playos-data partition —
+     * the USB stick's own data partition. Never fall back to a fixed internal
+     * NVMe/SATA playos-data, or the live session silently uses the installed
+     * OS's data (logs/saves/SSH key land on the wrong disk). */
+    int live_usb = (state->efi_mounted &&
+                    access("/EFI/playos/live-usb", F_OK) == 0);
+
     if (find_data_partition(device_path, sizeof(device_path),
-                            state->install_mode) != 0) {
+                            state->install_mode || live_usb) != 0) {
         dprintf(STDERR_FILENO,
                 "playos-init: data partition not found "
                 "(label=playos-data, block-device scan, /proc/partitions, "
-                "GPT GUID, cmdline playos.data_uuid=)\n");
+                "GPT GUID, cmdline playos.data_uuid=)%s\n",
+                live_usb ? " [live USB: removable playos-data required]" : "");
         log_available_block_devices();
         return -1;
     }
@@ -1196,8 +1205,8 @@ int playos_mount_data(struct playos_init_state *state)
     }
 
     dprintf(STDERR_FILENO,
-            "playos-init: /data mounted from %s (install_mode=%d)\n",
-            device_path, state->install_mode);
+            "playos-init: /data mounted from %s (install_mode=%d live_usb=%d)\n",
+            device_path, state->install_mode, live_usb);
 
     /* Drop a marker on every playos-data partition so the choice is
      * visible from any of them after the fact */
