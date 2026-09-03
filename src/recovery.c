@@ -153,7 +153,19 @@ playos_recovery_button_watch(int listen_ms)
     long long deadline_ms = (long long)ts.tv_sec * 1000 +
                             ts.tv_nsec / 1000000 + listen_ms;
 
+    int event_devices_seen = 0;
     while (1) {
+        DIR *probe = opendir("/dev/input");
+        if (probe) {
+            struct dirent *de;
+            int n = 0;
+            while ((de = readdir(probe)) != NULL)
+                if (strncmp(de->d_name, "event", 5) == 0)
+                    n++;
+            closedir(probe);
+            event_devices_seen = n;
+        }
+
         int fd = -1;
         const struct trigger *tr = NULL;
         if (find_held_trigger(&fd, &tr) == 0) {
@@ -171,8 +183,13 @@ playos_recovery_button_watch(int listen_ms)
         clock_gettime(CLOCK_MONOTONIC, &ts);
         long long now_ms = (long long)ts.tv_sec * 1000 +
                            ts.tv_nsec / 1000000;
-        if (now_ms >= deadline_ms)
+        if (now_ms >= deadline_ms) {
+            dprintf(STDERR_FILENO,
+                    "[recovery] watch ended, no trigger "
+                    "(event devices seen: %d)\n",
+                    event_devices_seen);
             return 0;
+        }
         usleep(RECOVERY_POLL_MS * 1000);
     }
 }
