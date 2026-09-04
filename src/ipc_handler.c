@@ -478,6 +478,15 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         return 0;
     }
 
+    /* ── ShowOverlay / HideOverlay (Sprint 14) ──────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_SHOW_OVERLAY) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_HIDE_OVERLAY) == 0) {
+        playos_log_write(s, "ipc", "%s requested via IPC", msg.type);
+        int rc = playos_compositor_send(s, msg.type, NULL);
+        playos_ipc_message_free(&msg);
+        return rc;
+    }
+
     /* ── TerminateGame ──────────────────────────────────────── */
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_TERMINATE_GAME) == 0) {
         if (s->game_pid == 0) {
