@@ -66,6 +66,13 @@ static void child_log_redirect(const char *path)
     dup2(fd, STDERR_FILENO);
     if (fd > STDERR_FILENO)
         close(fd);
+
+    /* stderr is a file here, so stdio would block-buffer it and a crashing
+     * child would take its last (most useful) log lines to the grave - that is
+     * exactly how the compositor's SIGSEGV during the installer handoff looked
+     * like "the log just stops at startup". Line-buffer both streams. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
 /* ── SIGCHLD handler ─────────────────────────────────────────────── */
