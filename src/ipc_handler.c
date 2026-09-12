@@ -351,13 +351,21 @@ static int handle_message(struct playos_init_state *s, int client_fd,
             return 0;
         }
 
-        /* Shared runtime handoff: stop shell+overlay, unmount /data+/EFI,
-         * spawn installer (or respawn shell+overlay and error). */
-        if (playos_supervisor_start_runtime_installer(s) == 0)
-            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
-        else
-            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ERROR);
+        /* Answer BEFORE the handoff. The shell's playos_trusted_start_installer_target()
+         * is a synchronous send_and_recv(): it sits in recv() waiting for this
+         * acknowledgement. The handoff's first act is to wait for the shell to
+         * exit, so acking afterwards deadlocked the pair for the whole 2 s
+         * timeout - and by the time the shell finally left, the installer had
+         * already registered, been rejected with "shell role already taken" and
+         * aborted. The ack means "accepted, handing over now". */
+        send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
         playos_ipc_message_free(&msg);
+
+        /* Shared runtime handoff: stop shell+overlay, release the target,
+         * spawn the installer (or respawn shell+overlay on failure). */
+        if (playos_supervisor_start_runtime_installer(s) != 0)
+            playos_log_write(s, "ipc",
+                             "StartInstaller: handoff failed, session restored");
         return 0;
     }
 

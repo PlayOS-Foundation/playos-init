@@ -664,6 +664,48 @@ void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
 
 /* S13.7: wait for a SIGTERM'd child to actually exit (closes its /data fds)
  * before trying to unmount /data. Bounded so a stuck child still aborts. */
+
+/* Stop a UI client for the installer handoff. SIGTERM first so it can leave
+ * gracefully, then SIGKILL: the installer claims the shell role and the
+ * compositor only frees it once the old client's socket closes, so the handoff
+ * must not proceed while a client lingers. (A graceful exit used to take longer
+ * than the handoff's wait whenever the client was blocked on IPC.) */
+static void
+stop_client_hard(struct playos_init_state *s, const char *name, pid_t pid)
+{
+	if (pid <= 0)
+		return;
+
+	kill(pid, SIGTERM);
+
+	int waited = 0;
+	while (waited < 800) {
+		int st;
+		pid_t r = waitpid(pid, &st, WNOHANG);
+		if (r == pid || (r < 0 && errno == ECHILD))
+			return;
+		usleep(50000);
+		waited += 50;
+	}
+
+	playos_log_write(s, "sup",
+	                 "%s PID %d still alive after SIGTERM (%d ms) — killing",
+	                 name, pid, waited);
+	kill(pid, SIGKILL);
+
+	waited = 0;
+	while (waited < 800) {
+		int st;
+		pid_t r = waitpid(pid, &st, WNOHANG);
+		if (r == pid || (r < 0 && errno == ECHILD))
+			return;
+		usleep(50000);
+		waited += 50;
+	}
+
+	playos_log_write(s, "sup", "WARN: %s PID %d survived SIGKILL", name, pid);
+}
+
 static void
 wait_child_exit(struct playos_init_state *s, pid_t pid, int timeout_ms)
 {
@@ -726,8 +768,8 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	/* SIGTERM is async — wait for the clients to die so the compositor releases
 	 * their trusted roles (and their /data/log fds) before the installer claims
 	 * the foreground. */
-	wait_child_exit(s, shell_pid, 2000);
-	wait_child_exit(s, overlay_pid, 2000);
+	stop_client_hard(s, "overlay", overlay_pid);
+	stop_client_hard(s, "shell", shell_pid);
 	wait_child_exit(s, ssh_pid, 2000);
 
 	/* Dev SSH key handoff: /tmp is shared with the installer child and survives
