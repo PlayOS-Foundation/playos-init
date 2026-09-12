@@ -62,6 +62,14 @@ void playos_supervisor_overlay_exited(struct playos_init_state *s,
 
 /* Launch the PlayOS installer as a Wayland client (Sprint 10) */
 void playos_supervisor_spawn_installer(struct playos_init_state *s);
+
+/* S14: is `mountpoint` backed by a partition of the install target ("" target =
+ * unknown, treated as yes)? Used by the installer handoff to release only what
+ * the target holds. */
+int  playos_mount_is_on_target(const char *mountpoint, const char *target);
+
+/* Best-effort restore of an ESP released for the install (failed-install path). */
+void playos_supervisor_remount_installer_efi(struct playos_init_state *s);
 void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s);
 void playos_supervisor_stop_compositor(struct playos_init_state *s);
 int playos_supervisor_start_runtime_installer(struct playos_init_state *s);

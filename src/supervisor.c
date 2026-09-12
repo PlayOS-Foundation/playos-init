@@ -587,12 +587,30 @@ void playos_supervisor_installer_exited(struct playos_init_state *s,
 	s->installer_pid = 0;
 
 	/* S13.7: a Settings-triggered install reboots into the installed OS;
-	 * the boot-time installer keeps the restart policy for QEMU automation. */
+	 * the boot-time installer keeps the restart policy for QEMU automation.
+	 *
+	 * S14 follow-up: succeed -> reboot; fail -> hand the session back to the
+	 * user. A surprise reboot after a failed install told them nothing and
+	 * threw away the shell they were using. The installer logs to
+	 * /data/log/installer.log, which now survives (the handoff no longer
+	 * unmounts /data), so the failure can be inspected afterwards. */
 	if (s->installer_runtime_mode) {
+		if (exit_code == 0 && signal_num == 0) {
+			playos_log_write(s, "sup",
+			                 "runtime installer finished (code=%d) — rebooting",
+			                 exit_code);
+			playos_shutdown(s, 1); /* never returns */
+		}
+
 		playos_log_write(s, "sup",
-		                 "runtime installer finished (code=%d) — rebooting",
-		                 exit_code);
-		playos_shutdown(s, 1); /* never returns */
+		                 "runtime installer FAILED (code=%d signal=%d) — "
+		                 "returning to the shell",
+		                 exit_code, signal_num);
+		s->installer_runtime_mode = 0;
+		playos_supervisor_remount_installer_efi(s);
+		playos_supervisor_spawn_shell(s);
+		playos_supervisor_spawn_overlay(s);
+		return;
 	}
 
 	if (installer_should_restart(s)) {
@@ -661,7 +679,6 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 {
 	pid_t shell_pid = s->shell_pid;
 	pid_t overlay_pid = s->overlay_pid;
-	pid_t compositor_pid = s->compositor_pid;
 	pid_t ssh_pid = s->ssh_pid;
 
 	/* S14-T10: seamless, console-free handoff. Suppress kernel console
@@ -678,13 +695,13 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 		close(tty);
 	}
 
+	/* Only the UI clients make way. The compositor stays up: stopping it cost
+	 * a DRM modeset blink (a black flash between the shell and the installer),
+	 * and /data stays mounted — it holds the boot medium's data partition, never
+	 * the target (the picker refuses the disk the system booted from), so
+	 * unmounting bought nothing and made the installer lose its log. */
 	playos_supervisor_stop_shell_and_overlay(s);
-	/* The compositor also holds /data/log/compositor-stderr.log open, and
-	 * init holds /data/log/init.log; stop/close both so /data can unmount. */
-	playos_supervisor_stop_compositor(s);
-	playos_log_close_persistent(s);
 
-	/* SSH bring-up also logs to /data/log/ssh-bringup.log. */
 	if (ssh_pid > 0) {
 		playos_log_write(s, "sup", "stopping ssh-bringup PID %d for installer handoff",
 		                 ssh_pid);
@@ -692,17 +709,15 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 		s->ssh_pid = 0;
 	}
 
-	/* SIGTERM is async — wait for the children to actually die so their
-	 * /data/log/* fds are closed before umount. */
-	wait_child_exit(s, compositor_pid, 2000);
+	/* SIGTERM is async — wait for the clients to die so the compositor releases
+	 * their trusted roles (and their /data/log fds) before the installer claims
+	 * the foreground. */
 	wait_child_exit(s, shell_pid, 2000);
 	wait_child_exit(s, overlay_pid, 2000);
 	wait_child_exit(s, ssh_pid, 2000);
 
-	/* S13.7: preserve the dev SSH key before /data is unmounted. A lazy
-	 * MNT_DETACH can leave the USB playos-data superblock busy, so the
-	 * installer cannot mount it to re-read the key; /tmp is shared with the
-	 * installer child and survives the unmount. */
+	/* Dev SSH key handoff: /tmp is shared with the installer child and survives
+	 * regardless of where /data lives. */
 	{
 		FILE *key_in = fopen("/data/ssh/authorized_keys", "r");
 		if (key_in) {
@@ -721,40 +736,121 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 		}
 	}
 
-	int umount_ok = 1;
-	/* /data and /EFI live on the boot medium, never on the internal target
-	 * being repartitioned, so a busy mount can be safely detached after the
-	 * known /data log holders (shell/overlay/compositor/ssh/init) are gone. */
-	if (umount("/data") != 0 && errno != EINVAL &&
-	    umount2("/data", MNT_DETACH) != 0) {
-		playos_log_write(s, "sup", "runtime installer: umount /data failed: %s",
-		                 strerror(errno));
-		umount_ok = 0;
-	}
-	if (umount_ok && umount("/EFI") != 0 && errno != EINVAL &&
-	    umount2("/EFI", MNT_DETACH) != 0) {
-		playos_log_write(s, "sup", "runtime installer: umount /EFI failed: %s",
-		                 strerror(errno));
-		umount_ok = 0;
-	}
-
-	if (!umount_ok) {
+	/* Release the target: no partition of the disk being repartitioned may be
+	 * mounted. In practice that is the ESP init mounted for A/B accounting.
+	 * When the target is a different disk (e.g. an external SSD) the ESP is left
+	 * alone and nothing has to be re-mounted afterwards. */
+	s->installer_efi_released = 0;
+	if (playos_mount_is_on_target("/EFI", s->installer_target_disk)) {
+		if (umount("/EFI") == 0 || umount2("/EFI", MNT_DETACH) == 0) {
+			s->installer_efi_released = 1;
+			playos_log_write(s, "sup",
+			                 "released /EFI — it lives on the install target %s",
+			                 s->installer_target_disk);
+		} else {
+			playos_log_write(s, "sup",
+			                 "WARN: could not release /EFI (%s) before installing "
+			                 "to %s", strerror(errno), s->installer_target_disk);
+		}
+	} else {
 		playos_log_write(s, "sup",
-		                 "runtime installer aborted — respawning compositor/shell/overlay");
-		s->installer_runtime_mode = 0;
-		playos_supervisor_spawn_compositor(s);
-		playos_supervisor_spawn_shell(s);
-		playos_supervisor_spawn_overlay(s);
-		playos_log_open_persistent(s);
-		return -1;
+		                 "keeping /EFI mounted (not on the install target %s)",
+		                 s->installer_target_disk[0]
+		                     ? s->installer_target_disk : "(unknown)");
 	}
 
 	s->installer_runtime_mode = 1;
-	/* Fresh compositor without any /data fds, then the installer client. */
-	playos_supervisor_spawn_compositor(s);
-	usleep(500000);
 	playos_supervisor_spawn_installer(s);
 	return 0;
+}
+
+/* Best-effort re-mount of the ESP the handoff released, for the case where the
+ * installer failed and the shell comes back: without it /EFI would stay missing
+ * and A/B accounting plus the recovery menu's slot display would be degraded. */
+void
+playos_supervisor_remount_installer_efi(struct playos_init_state *s)
+{
+	if (!s->installer_efi_released)
+		return;
+
+	/* The device may have been repartitioned, so resolve by label again. */
+	char dev[128] = {0};
+	if (playos_find_partition_by_label("ESP", dev, sizeof(dev)) != 0 ||
+	    mount(dev, "/EFI", "vfat", 0, NULL) != 0) {
+		playos_log_write(s, "sup",
+		                 "could not restore /EFI after the failed install: %s",
+		                 strerror(errno));
+		return;
+	}
+
+	s->efi_mounted = 1;
+	s->installer_efi_released = 0;
+	playos_log_write(s, "sup", "restored /EFI (%s) after the failed install", dev);
+}
+
+/* Base disk name of a device or mount source: "/dev/nvme0n1p1" -> "nvme0n1",
+ * "/dev/sda3" -> "sda". Used to decide whether a mount sits on the install
+ * target. */
+static void
+base_disk_name(const char *dev, char *out, size_t outsz)
+{
+	const char *b = strrchr(dev, '/');
+	b = b ? b + 1 : dev;
+
+	size_t len = strlen(b);
+	size_t digits = 0;
+	while (digits < len && b[len - 1 - digits] >= '0' && b[len - 1 - digits] <= '9')
+		digits++;
+	if (digits > 0) {
+		size_t cut = len - digits;
+		if (cut > 0 && b[cut - 1] == 'p')
+			cut--;
+		len = cut;
+	}
+	if (len == 0)
+		len = strlen(b);
+	if (len >= outsz)
+		len = outsz - 1;
+	snprintf(out, outsz, "%.*s", (int)len, b);
+}
+
+/* Is `mountpoint` backed by a partition of `target` ("" = unknown target, in
+ * which case we assume the old behaviour and say yes: release it)? */
+int
+playos_mount_is_on_target(const char *mountpoint, const char *target)
+{
+	if (!mountpoint)
+		return 0;
+
+	if (!target || !target[0]) {
+		/* Interactive installer without a preselected disk: we cannot know
+		 * where it will write, so release the ESP as before. */
+		return 1;
+	}
+
+	char dev[128] = {0};
+	FILE *f = fopen("/proc/mounts", "r");
+	if (f) {
+		char line[512];
+		while (fgets(line, sizeof(line), f)) {
+			char src[128], mnt[256];
+			if (sscanf(line, "%127s %255s", src, mnt) != 2)
+				continue;
+			if (strcmp(mnt, mountpoint) == 0) {
+				snprintf(dev, sizeof(dev), "%s", src);
+				break;
+			}
+		}
+		fclose(f);
+	}
+
+	if (dev[0] == '\0' || strncmp(dev, "/dev/", 5) != 0)
+		return 0;                     /* not mounted / not a block device */
+
+	char a[64], b[64];
+	base_disk_name(dev, a, sizeof(a));
+	base_disk_name(target, b, sizeof(b));
+	return strcmp(a, b) == 0;
 }
 
 /* S13.7: stop the compositor before a runtime installer handoff so its

@@ -109,6 +109,10 @@ struct playos_init_state {
      * destructive phase starts immediately instead of re-asking for a disk. */
     char                      installer_target_disk[64];
 
+    /* Set when the installer handoff released /EFI because it sits on the
+     * install target, so a failed install can restore it (S14). */
+    int                       installer_efi_released;
+
     /* Developer SSH supervision (Sprint 11.6) */
     pid_t                     ssh_pid;
     struct playos_restart_info ssh_restarts;
