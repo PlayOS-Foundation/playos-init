@@ -51,6 +51,10 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_FACTORY_RESET          "FactoryReset"
 #define PLAYOS_IPC_TYPE_FACTORY_RESET_COMPLETE "FactoryResetComplete"
 #define PLAYOS_IPC_TYPE_FACTORY_RESET_ERROR    "FactoryResetError"
+/* shell (recovery menu) → init: switch to the other A/B slot and reboot.
+ * init owns the boot.json schema and rollback semantics; the shell must not
+ * edit /EFI/playos/boot.json directly (Sprint 14). */
+#define PLAYOS_IPC_TYPE_ROLLBACK_SLOT          "RollbackSlot"
 
 /* ── Compositor control (Sprint 7) ─────────────────────────── */
 /* init → compositor */

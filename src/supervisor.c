@@ -605,19 +605,19 @@ void playos_supervisor_spawn_installer(struct playos_init_state *s)
 	spawn_installer(s);
 }
 
-/* S13.7: stop the live shell + overlay before a runtime installer handoff.
- * Zeroing the pids makes the pending SIGCHLD reaps go to the "unknown child"
- * path, so their restart policies never respawn them. */
+/* S13.7: stop the live shell + overlay before a runtime installer handoff or
+ * a recovery restart. Zeroing the pids makes the pending SIGCHLD reaps go to
+ * the "unknown child" path, so their restart policies never respawn them. */
 void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s)
 {
 	if (s->overlay_pid > 0) {
-		playos_log_write(s, "sup", "stopping overlay PID %d for installer handoff",
+		playos_log_write(s, "sup", "stopping overlay PID %d",
 		                 s->overlay_pid);
 		kill(s->overlay_pid, SIGTERM);
 		s->overlay_pid = 0;
 	}
 	if (s->shell_pid > 0) {
-		playos_log_write(s, "sup", "stopping shell PID %d for installer handoff",
+		playos_log_write(s, "sup", "stopping shell PID %d",
 		                 s->shell_pid);
 		kill(s->shell_pid, SIGTERM);
 		s->shell_pid = 0;
@@ -1362,6 +1362,47 @@ playos_supervisor_lifecycle_tick(struct playos_init_state *s)
 }
 
 /* ── Recovery ────────────────────────────────────────────────────── */
+
+/* Enter the recovery UI from the running session (S14-T6).
+ *
+ * Unlike playos_enter_recovery() below (legacy: halts with a console banner),
+ * this keeps the compositor alive and restarts the shell in recovery mode so
+ * the recovery menu can render. Used by the non-blocking late button watch;
+ * the cmdline and data-missing paths set recovery_mode before the shell is
+ * first spawned instead. Idempotent. */
+void
+playos_supervisor_enter_recovery_ui(struct playos_init_state *s,
+                                    const char *reason)
+{
+    if (s->recovery_mode)
+        return;
+
+    playos_log_write(s, "init", "ENTERING RECOVERY UI: %s", reason);
+    s->recovery_mode = 1;
+    s->boot_stage = BOOT_STAGE_RECOVERY;
+    playos_boot_stage_write(BOOT_STAGE_RECOVERY);
+
+    /* A game should not be running this early in boot; stop it defensively. */
+    if (s->game_pid > 0)
+        kill(s->game_pid, SIGTERM);
+
+    pid_t shell_pid = s->shell_pid;
+    pid_t overlay_pid = s->overlay_pid;
+
+    /* Drop the live shell + overlay. Zeroing the pids makes their pending
+     * SIGCHLD reaps take the "unknown child" path, so the restart policies
+     * never respawn them and only our recovery shell comes back. */
+    playos_supervisor_stop_shell_and_overlay(s);
+    wait_child_exit(s, shell_pid, 1000);
+    wait_child_exit(s, overlay_pid, 1000);
+
+    if (s->compositor_state == COMPOSITOR_RUNNING) {
+        playos_supervisor_spawn_shell(s); /* PLAYOS_RECOVERY=1 */
+    } else {
+        playos_log_write(s, "sup",
+                         "recovery UI requested but compositor is not running");
+    }
+}
 
 void playos_enter_recovery(struct playos_init_state *s, const char *reason)
 {

@@ -487,6 +487,40 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         return rc;
     }
 
+    /* ── RollbackSlot (Sprint 14 recovery menu) ─────────────── */
+    /* Switch the active A/B slot to the other one and reboot. init owns the
+     * boot.json schema and the rollback semantics (mark the current slot bad,
+     * the target slot pending, reset its boot count), so the shell asks for
+     * this over IPC instead of rewriting /EFI/playos/boot.json itself. */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_ROLLBACK_SLOT) == 0) {
+        playos_log_write(s, "ipc", "rollback requested via IPC");
+
+        struct boot_slot_state bs;
+        if (boot_slot_read(PLAYOS_BOOT_JSON_PATH, &bs) != 0) {
+            playos_log_write(s, "ipc",
+                             "RollbackSlot rejected: boot.json unreadable");
+            playos_ipc_message_free(&msg);
+            return -1;
+        }
+
+        char from = bs.active_slot;
+        if (boot_slot_rollback(PLAYOS_BOOT_JSON_PATH, &bs) != 0) {
+            playos_log_write(s, "ipc",
+                             "RollbackSlot failed: cannot persist boot.json");
+            playos_ipc_message_free(&msg);
+            return -1;
+        }
+
+        playos_log_write(s, "ipc",
+                         "RollbackSlot: active slot %c -> %c, rebooting",
+                         from, bs.active_slot);
+        playos_ipc_message_free(&msg);
+
+        /* Orderly reboot so the ESP write is flushed (never returns). */
+        playos_shutdown(s, 1);
+        return -1;
+    }
+
     /* ── TerminateGame ──────────────────────────────────────── */
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_TERMINATE_GAME) == 0) {
         if (s->game_pid == 0) {

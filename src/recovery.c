@@ -11,9 +11,10 @@
  *                             power-on and enters BIOS, so this only works on
  *                             devices whose firmware does not intercept it)
  *
- * Normal boots are not delayed by the instant check; the late watch adds a
- * bounded listen window so a hold that starts slightly after boot begins is
- * still caught.
+ * Normal boots are not delayed: the boot path only ever calls the instant
+ * playos_recovery_button_held() check, polled non-blocking from the
+ * supervision loop. playos_recovery_button_watch() is a blocking helper kept
+ * for callers that explicitly want a bounded listen window.
  */
 #define _DEFAULT_SOURCE 1
 #include "playos-init/recovery.h"

@@ -77,7 +77,13 @@ void playos_supervisor_spawn_ssh(struct playos_init_state *s);
 void playos_supervisor_ssh_exited(struct playos_init_state *s,
                                   int exit_code, int signal);
 
-/* Enter recovery mode */
+/* Enter recovery mode (legacy: halts the system with a console banner) */
 void playos_enter_recovery(struct playos_init_state *state, const char *reason);
+
+/* Enter the recovery UI from the running session (S14-T6): keeps the
+ * compositor alive and restarts the shell with PLAYOS_RECOVERY=1 so the
+ * recovery menu renders. Idempotent; no-op when already in recovery. */
+void playos_supervisor_enter_recovery_ui(struct playos_init_state *s,
+                                         const char *reason);
 
 #endif /* PLAYOS_SUPERVISOR_H */

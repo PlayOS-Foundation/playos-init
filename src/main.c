@@ -259,23 +259,13 @@ int main(void)
     /* Stage 3b: Thermal thresholds + EPP profile sync (Sprint 9) */
     playos_thermal_init(s);
 
-    /* S14-T6: late recovery check. The early check right after udev can miss
-     * the ROG Ally internal controller before it enumerates, so re-check now
-     * that input devices are settled — this catches a START+SELECT / volume
-     * hold that began at power-on. A 4s watch window also catches holds that
-     * start a moment after this point in boot. Console prompts give the user
-     * feedback so they know when to hold and when it was detected. */
-    if (!s->recovery_mode) {
-        dprintf(STDERR_FILENO,
-                "\n[recovery] Hold START+SELECT for 2s to enter recovery...\n");
-        if (playos_recovery_button_watch(4000)) {
-            s->recovery_mode = 1;
-            dprintf(STDERR_FILENO,
-                    "[recovery] DETECTED - entering recovery mode\n");
-            playos_log_write(s, "init",
-                             "recovery requested via button hold (late watch)");
-        }
-    }
+    /* S14-T6: late recovery detection is handled *non-blocking* in the
+     * supervision loop below (see the recovery watch there). The old code
+     * blocked here for 4s and printed a console prompt on every boot, which
+     * broke the <5s cold-boot target and leaked raw console text; the loop
+     * now polls the instant held-check instead, so a normal boot never waits.
+     * `s->recovery_mode` may already be set here by the cmdline, the early
+     * button check, or a missing /data partition. */
 
     /* Stage 4: Spawn compositor */
     playos_boot_stage_write(BOOT_STAGE_COMPOSITOR);
@@ -304,6 +294,21 @@ int main(void)
         dprintf(STDERR_FILENO, "\n  PlayOS — playos-shell on wlroots DRM/KMS\n");
     }
     dprintf(STDERR_FILENO, "  System ready.\n\n");
+
+    /* S14-T6: non-blocking late recovery watch.
+     *
+     * The ROG Ally internal controller can enumerate after the early check
+     * above, so re-check once devices are settled — but without delaying a
+     * normal boot. Poll the instant held-check (returns immediately when no
+     * trigger is held) once per supervision tick for the first few seconds;
+     * on detection the shell is restarted in recovery mode. This keeps the
+     * button-hold entry point while leaving the <5s cold-boot path intact and
+     * printing nothing to the console unless recovery is actually requested. */
+    struct timespec recovery_watch_ts;
+    clock_gettime(CLOCK_MONOTONIC, &recovery_watch_ts);
+    long long recovery_watch_deadline_ms =
+        (long long)recovery_watch_ts.tv_sec * 1000 +
+        recovery_watch_ts.tv_nsec / 1000000 + 5000;
 
     /* Main supervision loop */
     for (;;) {
@@ -349,6 +354,25 @@ int main(void)
         /* Process incoming IPC connections */
         playos_ipc_server_poll(s);
         playos_compositor_server_poll(s);
+
+        /* S14-T6: non-blocking late recovery watch (see above). The instant
+         * held-check is cheap and returns 0 immediately when nothing is held,
+         * so this only costs a syscall per tick and never blocks a normal
+         * boot. Detection restarts the shell in recovery mode. */
+        if (!s->recovery_mode && !s->install_mode &&
+            s->compositor_state == COMPOSITOR_RUNNING) {
+            struct timespec now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            long long now_ms = (long long)now_ts.tv_sec * 1000 +
+                               now_ts.tv_nsec / 1000000;
+            if (now_ms < recovery_watch_deadline_ms &&
+                playos_recovery_button_held()) {
+                dprintf(STDERR_FILENO,
+                        "\n[recovery] DETECTED - entering recovery mode\n");
+                playos_supervisor_enter_recovery_ui(s,
+                    "button hold (late watch)");
+            }
+        }
 
         /* Reap any zombie children */
         playos_supervisor_reap_children(s);
