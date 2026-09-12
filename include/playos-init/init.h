@@ -112,6 +112,8 @@ struct playos_init_state {
     /* Set when the installer handoff released /EFI because it sits on the
      * install target, so a failed install can restore it (S14). */
     int                       installer_efi_released;
+    /* When the runtime installer was spawned, for failure diagnostics. */
+    long                      installer_started_at;
 
     /* Developer SSH supervision (Sprint 11.6) */
     pid_t                     ssh_pid;

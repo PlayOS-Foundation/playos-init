@@ -545,6 +545,7 @@ static void spawn_installer(struct playos_init_state *s)
 
 	/* Parent: track as child */
 	s->installer_pid = pid;
+	s->installer_started_at = time(NULL);
 	playos_log_write(s, "sup", "installer launched (PID %d)", pid);
 }
 
@@ -602,14 +603,20 @@ void playos_supervisor_installer_exited(struct playos_init_state *s,
 			playos_shutdown(s, 1); /* never returns */
 		}
 
+		long lived = s->installer_started_at
+		                 ? (long)(time(NULL) - s->installer_started_at) : -1;
 		playos_log_write(s, "sup",
-		                 "runtime installer FAILED (code=%d signal=%d) — "
-		                 "returning to the shell",
-		                 exit_code, signal_num);
+		                 "runtime installer FAILED (code=%d signal=%d, ran %lds) — "
+		                 "returning to the shell (stderr: "
+		                 "/data/log/installer-stderr.log)",
+		                 exit_code, signal_num, lived);
 		s->installer_runtime_mode = 0;
 		playos_supervisor_remount_installer_efi(s);
 		playos_supervisor_spawn_shell(s);
 		playos_supervisor_spawn_overlay(s);
+		/* SSH was stopped for the handoff: without this the session comes back
+		 * with the UI but no way in (S14). */
+		spawn_ssh(s);
 		return;
 	}
 
@@ -760,6 +767,14 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 	}
 
 	s->installer_runtime_mode = 1;
+
+	/* The installer registers the trusted *shell* role before it creates its
+	 * window, and the compositor rejects a second claim with a protocol error
+	 * (libwayland then aborts the client). Waiting for the shell's process to
+	 * exit is not quite enough: the compositor still has to process the closed
+	 * socket and release the role. Give it an event-loop turn. */
+	usleep(300000);
+
 	playos_supervisor_spawn_installer(s);
 	return 0;
 }
