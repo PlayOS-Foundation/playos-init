@@ -19,6 +19,7 @@
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
 #include "playos-init/boot_slot.h"
+#include "playos-init/boot_media.h"
 
 extern char **environ;
 
@@ -991,6 +992,20 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         playos_log_write(s, "init",
                          "live USB marker present — staying in initramfs "
                          "(skip pivot to installed slot)");
+        return 1;
+    }
+
+    /* S14-T10 follow-up: ask the firmware what it booted. After an install the
+     * live USB and the internal disk share every partition name (ESP,
+     * playos-a, playos-b, playos-data), so ESP discovery can mount the NVMe's
+     * ESP, find no live marker there, and pivot into the *installed* slot —
+     * "boot from USB" then silently boots the installed system and the
+     * installer never appears. BootCurrent is unambiguous, so it wins whenever
+     * the firmware answers. */
+    if (playos_booted_from_usb() == 1) {
+        playos_log_write(s, "init",
+                         "firmware booted from USB — staying in initramfs "
+                         "(live/installer medium, skip pivot)");
         return 1;
     }
 

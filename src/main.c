@@ -25,6 +25,7 @@
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
+#include "playos-init/boot_media.h"
 #include "playos-init/boot_slot.h"
 #include "playos-init/supervisor.h"
 #include "playos-init/ipc_handler.h"
@@ -220,7 +221,14 @@ int main(void)
          * The exec'd second init re-mounts the ESP above but must not advance
          * the counter again — doing so would double-count every boot and
          * falsely trigger 3-strike rollback. */
-        if (s->efi_mounted && !already_pivoted) {
+        /* A live-USB (or installer) boot must not touch the *installed*
+         * system's A/B counters: init mounts whatever ESP the name lookup
+         * finds first, which after an install can be the internal NVMe's even
+         * when the firmware booted the USB. Counting those boots would let
+         * repeated live sessions trip the 3-strike rollback of a healthy
+         * installed slot. */
+        if (s->efi_mounted && !already_pivoted &&
+            playos_booted_from_usb() != 1) {
             struct boot_slot_state bs;
             if (boot_slot_increment(PLAYOS_BOOT_JSON_PATH, &bs)) {
                 playos_log_write(s, "init",

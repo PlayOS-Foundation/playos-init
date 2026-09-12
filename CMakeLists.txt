@@ -31,6 +31,7 @@ set(PLAYOS_INIT_SOURCES
     src/recovery.c
     src/sha256.c
     src/boot_slot.c
+    src/boot_media.c
     src/update.c
     # Sprint 12 security sandbox
     src/security/sandbox.c
@@ -54,6 +55,7 @@ set(PLAYOS_INIT_HEADERS
     include/playos-init/thermal.h
     include/playos-init/recovery.h
     include/playos-init/boot_slot.h
+    include/playos-init/boot_media.h
     include/playos-init/update.h
     include/playos-init/sha256.h
     include/playos-init/security.h
@@ -134,6 +136,15 @@ if(BUILD_TESTS)
     target_include_directories(test_init_state PRIVATE include)
     target_compile_options(test_init_state PRIVATE -Wall -Wextra)
     add_test(NAME init_state COMMAND test_init_state)
+
+    # S14-T10: firmware boot-medium detection (live USB vs fixed disk)
+    add_executable(test_boot_media
+        tests/host/test_boot_media.c
+        src/boot_media.c
+    )
+    target_include_directories(test_boot_media PRIVATE include)
+    target_compile_options(test_boot_media PRIVATE -Wall -Wextra)
+    add_test(NAME boot_media COMMAND test_boot_media)
 
     # Sprint 13 T5: vendor-agnostic hwmon name classification
     add_executable(test_hwmon_names
