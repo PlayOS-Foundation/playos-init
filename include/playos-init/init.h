@@ -104,6 +104,11 @@ struct playos_init_state {
     int                       install_mode;        /* booted with playos.mode=install */
     int                       installer_runtime_mode; /* S13.7: started via StartInstaller IPC */
 
+    /* S14-T10: install target picked in the shell's installer front-end. When
+     * set it is handed to the installer via PLAYOS_INSTALL_TARGET, so the
+     * destructive phase starts immediately instead of re-asking for a disk. */
+    char                      installer_target_disk[64];
+
     /* Developer SSH supervision (Sprint 11.6) */
     pid_t                     ssh_pid;
     struct playos_restart_info ssh_restarts;

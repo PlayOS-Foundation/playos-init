@@ -320,6 +320,30 @@ static int handle_message(struct playos_init_state *s, int client_fd,
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_START_INSTALLER) == 0) {
         playos_log_write(s, "ipc", "StartInstaller requested via IPC");
 
+        /* S14-T10: the shell's installer front-end already asked the user
+         * which disk to use; carry it through to the installer child so the
+         * destructive phase can start without asking again. Absent (or
+         * empty) means "let the installer show its own picker". */
+        memset(s->installer_target_disk, 0, sizeof(s->installer_target_disk));
+        {
+            const char *p = strstr(msg.json_raw, "\"target_disk\"");
+            if (p)
+                p = strchr(p, ':');
+            if (p)
+                p = strchr(p, '"');
+            if (p) {
+                const char *end = strchr(p + 1, '"');
+                if (end && (size_t)(end - (p + 1)) <
+                           sizeof(s->installer_target_disk)) {
+                    memcpy(s->installer_target_disk, p + 1,
+                           (size_t)(end - (p + 1)));
+                }
+            }
+        }
+        if (s->installer_target_disk[0])
+            playos_log_write(s, "ipc", "StartInstaller target disk: %s",
+                             s->installer_target_disk);
+
         if (s->install_mode) {
             /* Boot-time installer already running: ack, no-op. */
             send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);

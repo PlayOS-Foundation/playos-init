@@ -525,6 +525,12 @@ static void spawn_installer(struct playos_init_state *s)
 		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
 		setenv("WAYLAND_DISPLAY", "playos-0", 1);
 
+		/* S14-T10: the shell already asked the user which disk to install
+		 * to; hand that answer over so the installer starts the
+		 * destructive phase directly instead of re-showing its picker. */
+		if (s->installer_target_disk[0])
+			setenv("PLAYOS_INSTALL_TARGET", s->installer_target_disk, 1);
+
 		/* /data may not exist on an installer boot; redirect only when
 		 * the persistent log directory is actually available. */
 		child_log_redirect("/data/log/installer-stderr.log");
