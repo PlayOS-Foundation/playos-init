@@ -21,6 +21,7 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <poll.h>
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
@@ -58,6 +59,58 @@ static void print_banner(void)
 }
 
 /* ── Main ────────────────────────────────────────────────────────── */
+
+/* Monotonic milliseconds. The housekeeping ticks below are time-based so an
+ * early wake-up on IPC activity cannot fast-forward them. */
+static long long
+playos_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Wait for IPC activity or the next 1 Hz tick, whichever comes first.
+ *
+ * This replaced an unconditional 1 s nanosleep(). The IPC sockets are polled
+ * non-blocking (poll(...,0)) and only serviced once per loop iteration, so a
+ * fixed sleep delayed every control request by up to a second — most visibly
+ * the in-game COMMAND -> pause-overlay path (shell -> init -> compositor).
+ * Waiting on the fds makes init react in milliseconds while still ticking at
+ * 1 Hz. SIGCHLD interrupts poll() just as it interrupted nanosleep(). */
+static void
+playos_wait_for_ipc(struct playos_init_state *s)
+{
+    struct pollfd fds[3];
+    nfds_t n = 0;
+
+    if (s->control_sock_fd >= 0) {
+        fds[n].fd = s->control_sock_fd;
+        fds[n].events = POLLIN;
+        fds[n].revents = 0;
+        n++;
+    }
+    if (s->compositor_sock_fd >= 0) {
+        fds[n].fd = s->compositor_sock_fd;
+        fds[n].events = POLLIN;
+        fds[n].revents = 0;
+        n++;
+    }
+    if (s->shell_listener_fd >= 0) {
+        fds[n].fd = s->shell_listener_fd;
+        fds[n].events = POLLIN;
+        fds[n].revents = 0;
+        n++;
+    }
+
+    if (n == 0) {
+        struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        return;
+    }
+
+    (void)poll(fds, n, 1000);
+}
 
 int main(void)
 {
@@ -377,39 +430,47 @@ int main(void)
         /* Reap any zombie children */
         playos_supervisor_reap_children(s);
 
-        /* Non-cooperative game SIGSTOP fallback (Sprint 7) */
-        playos_supervisor_lifecycle_tick(s);
+        /* 1 Hz housekeeping. The loop now wakes early on IPC activity, so
+         * gate these by time rather than assuming one iteration per second:
+         * the thermal monitor walks sysfs and the lifecycle tick drives the
+         * non-cooperative game SIGSTOP timer (Sprint 7/9). */
+        static long long last_housekeeping_ms = 0;
+        long long housekeeping_now_ms = playos_now_ms();
+        if (housekeeping_now_ms - last_housekeeping_ms >= 1000) {
+            last_housekeeping_ms = housekeeping_now_ms;
+            playos_supervisor_lifecycle_tick(s);
+            playos_thermal_tick(s);
+        }
 
-        /* 1 Hz thermal monitor + EPP profile enforcement (Sprint 9) */
-        playos_thermal_tick(s);
+        /* Loop start time for the time-based one-shot ticks below. The loop
+         * wakes early on IPC activity, so counting iterations is no longer a
+         * proxy for elapsed seconds. */
+        static long long loop_start_ms = 0;
+        if (loop_start_ms == 0)
+            loop_start_ms = playos_now_ms();
 
         /* One-shot late audio snapshot ~5s into the loop. The Realtek/
          * CS35L41 speaker card (card 1) registers a few seconds after boot,
          * after the early snapshot in Stage 2; this append-only re-dump makes
          * the ALSA topology section actually include the speaker card. */
-        static int late_audio_ticks = 0;
-        if (late_audio_ticks < 5) {
-            late_audio_ticks++;
-            if (late_audio_ticks == 5)
-                playos_audio_debug_dump_late();
+        static int late_audio_done = 0;
+        if (!late_audio_done && playos_now_ms() - loop_start_ms >= 5000) {
+            late_audio_done = 1;
+            playos_audio_debug_dump_late();
         }
 
         /* Sprint 11: fallback healthy-boot gate ~60s into the loop. The
          * ShellReady path marks the slot good as soon as the shell registers;
          * this backstop covers a shell that never connects. Idempotent. */
-        static int boot_good_ticks = 0;
-        if (boot_good_ticks < 60) {
-            boot_good_ticks++;
-            if (boot_good_ticks == 60)
-                playos_boot_mark_good_once(s);
+        static int boot_good_done = 0;
+        if (!boot_good_done && playos_now_ms() - loop_start_ms >= 60000) {
+            boot_good_done = 1;
+            playos_boot_mark_good_once(s);
         }
 
-        /*
-         * Sleep briefly to avoid busy-waiting.
-         * SIGCHLD or IPC activity will wake us.
-         */
-        struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-        nanosleep(&ts, NULL);
+        /* Wait for IPC or the next 1 Hz tick — see playos_wait_for_ipc().
+         * SIGCHLD still interrupts the wait. */
+        playos_wait_for_ipc(s);
     }
 
     /* Unreachable — PID 1 never returns */
