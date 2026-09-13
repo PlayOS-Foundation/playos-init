@@ -188,6 +188,40 @@ void playos_supervisor_reap_children(struct playos_init_state *s)
 }
 
 /* ── Compositor supervision ──────────────────────────────────────── */
+/* Read `key=value` from /proc/cmdline into buf. Used for the developer/
+ * recovery escape hatches (playos.renderer=pixman) and any future boot option
+ * that init forwards to a child as an environment variable. */
+static void
+cmdline_value(const char *key, char *buf, size_t bufsz)
+{
+	buf[0] = '\0';
+
+	FILE *f = fopen("/proc/cmdline", "r");
+	if (!f)
+		return;
+
+	char line[1024] = {0};
+	if (!fgets(line, sizeof(line) - 1, f)) {
+		fclose(f);
+		return;
+	}
+	fclose(f);
+
+	size_t klen = strlen(key);
+	char *p = line;
+	while (p && *p) {
+		char *tok = p;
+		char *sp = strchr(p, ' ');
+		if (sp)
+			*sp = '\0';
+		if (strncmp(tok, key, klen) == 0 && tok[klen] == '=') {
+			snprintf(buf, bufsz, "%s", tok + klen + 1);
+			return;
+		}
+		p = sp ? sp + 1 : NULL;
+	}
+}
+
 
 int playos_supervisor_spawn_compositor(struct playos_init_state *s)
 {
@@ -206,6 +240,18 @@ int playos_supervisor_spawn_compositor(struct playos_init_state *s)
         setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
         setenv("WAYLAND_DISPLAY", "playos-0", 1);
         setenv("PLAYOS_BACKEND", "drm", 1);
+
+        /* Escape hatch for testing the software path: playos.renderer=pixman on
+         * the kernel cmdline forces the compositor's pixman renderer, which is
+         * what a machine with a broken GPU stack ends up with. The shell cannot
+         * render that way (it is a GL client), so recovery then falls back to
+         * the GL-free recovery client - the path this option exists to test. */
+        {
+            char renderer[32];
+            cmdline_value("playos.renderer", renderer, sizeof(renderer));
+            if (renderer[0])
+                setenv("PLAYOS_RENDERER", renderer, 1);
+        }
 
         /* NOTE (S14 F3): the recovery UI is deliberately NOT forced onto the
          * software renderer. Measured on the Ally: with WLR_RENDERER=pixman the
@@ -375,21 +421,77 @@ void playos_supervisor_shell_exited(struct playos_init_state *s,
         shell_restart(s);
     } else {
         playos_log_write(s, "sup",
-                         "shell restart limit exceeded (%d restarts in %ds) — "
-                         "leaving compositor running without shell",
+                         "shell restart limit exceeded (%d restarts in %ds)",
                          PLAYOS_SHELL_MAX_RESTARTS,
                          PLAYOS_SHELL_WINDOW_S);
-        /* Do NOT enter recovery — the system can still run without the shell.
-         * Games can still be launched via IPC, overlay remains available. */
+
+        /* S14 F3: in recovery the shell is the only UI, and it is a GL client.
+         * If it cannot run (EGL fails because the compositor had to fall back to
+         * software rendering, or the shell is otherwise broken), start the
+         * GL-free recovery client instead of leaving an empty compositor on
+         * screen. Outside recovery the system still runs without a shell (games
+         * launch via IPC, the overlay stays available). */
+        if (s->recovery_mode && s->recovery_ui_pid <= 0) {
+            playos_log_write(s, "sup",
+                             "recovery: shell unavailable — starting the "
+                             "GL-free recovery client");
+            playos_supervisor_spawn_recovery_ui(s);
+        } else if (!s->recovery_mode) {
+            playos_log_write(s, "sup",
+                             "leaving compositor running without shell");
+        }
     }
 }
 
 /* ── Test client auto-launch ─────────────────────────────────────── */
+/* ── GL-free recovery client (S14 F3) ─────────────────────────────── */
+
+void
+playos_supervisor_spawn_recovery_ui(struct playos_init_state *s)
+{
+	const char *path = "/usr/bin/playos-recovery";
+
+	if (s->compositor_state != COMPOSITOR_RUNNING) {
+		playos_log_write(s, "sup",
+		                 "recovery client needs a compositor; none running");
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		playos_log_write(s, "sup", "fork failed for %s", path);
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
+		setenv("WAYLAND_DISPLAY", "playos-0", 1);
+		child_log_redirect("/data/log/recovery-stderr.log");
+		execl(path, path, (char *)NULL);
+		_exit(127);
+	}
+
+	s->recovery_ui_pid = pid;
+	playos_log_write(s, "sup", "recovery client launched (PID %d)", pid);
+}
+
 /* ── Shell auto-launch (Sprint 5) ─────────────────────────────────── */
 
 static void spawn_shell(struct playos_init_state *s)
 {
 	const char *path = "/usr/bin/playos-shell";
+
+	/* Test hook: `playos.noshell` on the kernel cmdline makes the shell fail on
+	 * purpose, so the F3 path "shell cannot run in recovery -> GL-free recovery
+	 * client" can be exercised without a broken GPU (used by
+	 * scripts/qemu-recovery-check.sh). Test-only; never set in production. */
+	char noshell[8];
+	cmdline_value("playos.noshell", noshell, sizeof(noshell));
+	if (noshell[0]) {
+		playos_log_write(s, "sup",
+		                 "TEST: playos.noshell set - shell will fail by design");
+		path = "/bin/false";
+	}
 
 	playos_log_write(s, "sup", "spawning shell: %s", path);
 

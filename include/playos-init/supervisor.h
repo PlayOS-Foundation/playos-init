@@ -94,4 +94,9 @@ void playos_enter_recovery(struct playos_init_state *state, const char *reason);
 void playos_supervisor_enter_recovery_ui(struct playos_init_state *s,
                                          const char *reason);
 
+/* S14 F3: start the GL-free recovery UI (wl_shm client). Used when the shell
+ * cannot run in recovery - a GL client cannot initialise EGL against a
+ * software-rendered compositor. */
+void playos_supervisor_spawn_recovery_ui(struct playos_init_state *s);
+
 #endif /* PLAYOS_SUPERVISOR_H */

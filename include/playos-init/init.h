@@ -96,6 +96,11 @@ struct playos_init_state {
 
     /* Overlay supervision */
     pid_t                     overlay_pid;
+
+    /* S14 F3: GL-free recovery UI, started when the shell cannot run in
+     * recovery (a GL client cannot initialise EGL over a software-rendered
+     * compositor). -1/0 when not running. */
+    pid_t                     recovery_ui_pid;
     struct playos_restart_info overlay_restarts;
 
     /* Installer supervision (Sprint 10) */

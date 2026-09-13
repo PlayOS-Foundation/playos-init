@@ -33,6 +33,7 @@ void playos_init_state_init(struct playos_init_state *s)
     s->compositor_conn_fd = -1;
     s->overlay_restarts.window_start = time(NULL);
     s->recovery_mode = 0;
+    s->recovery_ui_pid = -1;
     s->active_profile = 0;
     s->thermal_state = 0;
     s->thermal_critical_since_ms = 0;
