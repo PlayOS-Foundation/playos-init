@@ -120,12 +120,6 @@ int main(void)
     /* PID 1 must not exit normally */
     playos_init_state_init(s);
 
-    /* S14-T6: recovery UI requested on the kernel cmdline. */
-    if (playos_recovery_requested()) {
-        s->recovery_mode = 1;
-        playos_log_write(s, "init", "recovery requested via cmdline (playos.recovery)");
-    }
-
     print_banner();
 
     /* Stage 1: Mount virtual filesystems */
@@ -140,6 +134,28 @@ int main(void)
     /* Initialize logging now that /run is available */
     playos_log_init(s);
     playos_log_write(s, "init", "playos-init starting as PID %d", getpid());
+
+    /* Kernel-cmdline decisions (S14-T6). These read /proc/cmdline, so they must
+     * run *after* playos_mount_virtual() — this used to run before /proc
+     * existed, which silently made `playos.recovery` a no-op on every boot
+     * (the button-hold path uses evdev, so it kept working). Log the cmdline
+     * itself too: every boot decision lives there. */
+    {
+        FILE *cl = fopen("/proc/cmdline", "r");
+        if (cl) {
+            char line[512] = {0};
+            if (fgets(line, sizeof(line) - 1, cl)) {
+                line[strcspn(line, "\n")] = '\0';
+                playos_log_write(s, "init", "cmdline: %s", line);
+            }
+            fclose(cl);
+        }
+    }
+    if (playos_recovery_requested()) {
+        s->recovery_mode = 1;
+        playos_log_write(s, "init",
+                         "recovery requested via cmdline (playos.recovery)");
+    }
 
     /* Sprint 12: start udevd and settle the device queue so /dev nodes get
      * their final ownership/group/mode (render, audio, input, ...) before

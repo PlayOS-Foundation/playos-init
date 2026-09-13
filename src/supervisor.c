@@ -207,6 +207,13 @@ int playos_supervisor_spawn_compositor(struct playos_init_state *s)
         setenv("WAYLAND_DISPLAY", "playos-0", 1);
         setenv("PLAYOS_BACKEND", "drm", 1);
 
+        /* S14 F3: recovery must not depend on the GPU/GL stack, so ask for the
+         * software (pixman) renderer. The compositor still prefers the real GPU
+         * device and only falls back to SimplEDRM, but with pixman it can draw
+         * even when EGL/GL is exactly what broke. */
+        if (s->recovery_mode)
+            setenv("PLAYOS_RENDERER", "pixman", 1);
+
         /* Persist stderr (trace markers, wlr_log) to /data for
          * on-device debugging */
         child_log_redirect("/data/log/compositor-stderr.log");
@@ -1576,9 +1583,22 @@ playos_supervisor_enter_recovery_ui(struct playos_init_state *s,
 
     if (s->compositor_state == COMPOSITOR_RUNNING) {
         playos_supervisor_spawn_shell(s); /* PLAYOS_RECOVERY=1 */
+        return;
+    }
+
+    /* The compositor is down - most likely because graphics is what broke, which
+     * is precisely when recovery has to work (S14 F3). Start it again in
+     * software mode (recovery_mode is set, so spawn_compositor exports
+     * PLAYOS_RENDERER=pixman) and then the recovery shell. */
+    playos_log_write(s, "sup",
+                     "recovery UI: compositor not running — starting it in "
+                     "software mode");
+    if (playos_supervisor_spawn_compositor(s) == 0) {
+        usleep(500000);
+        playos_supervisor_spawn_shell(s); /* PLAYOS_RECOVERY=1 */
     } else {
         playos_log_write(s, "sup",
-                         "recovery UI requested but compositor is not running");
+                         "recovery UI: software compositor start failed");
     }
 }
 
