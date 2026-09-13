@@ -207,12 +207,15 @@ int playos_supervisor_spawn_compositor(struct playos_init_state *s)
         setenv("WAYLAND_DISPLAY", "playos-0", 1);
         setenv("PLAYOS_BACKEND", "drm", 1);
 
-        /* S14 F3: recovery must not depend on the GPU/GL stack, so ask for the
-         * software (pixman) renderer. The compositor still prefers the real GPU
-         * device and only falls back to SimplEDRM, but with pixman it can draw
-         * even when EGL/GL is exactly what broke. */
-        if (s->recovery_mode)
-            setenv("PLAYOS_RENDERER", "pixman", 1);
+        /* NOTE (S14 F3): the recovery UI is deliberately NOT forced onto the
+         * software renderer. Measured on the Ally: with WLR_RENDERER=pixman the
+         * compositor comes up, but the shell is a GL client and Raylib's EGL
+         * cannot create a screen without dmabuf/GL ("failed to get driver name
+         * for fd -1" -> eglInitialize 0x3001), so it exits immediately and
+         * crash-loops, leaving an empty compositor (a blue screen). Recovery
+         * therefore keeps the accelerated renderer; the compositor's software
+         * path is a fallback for when EGL/KMS cannot start at all, and a
+         * recovery UI that needs no GL at all is still outstanding. */
 
         /* Persist stderr (trace markers, wlr_log) to /data for
          * on-device debugging */
