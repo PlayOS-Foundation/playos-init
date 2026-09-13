@@ -19,6 +19,8 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <poll.h>
@@ -113,6 +115,37 @@ playos_wait_for_ipc(struct playos_init_state *s)
     (void)poll(fds, n, 1000);
 }
 
+/* S14 P1: boot-time pacing helper. Connect-probe the compositor's Wayland
+ * socket so the shell starts the moment the compositor can talk to it. */
+static void
+playos_wait_for_wayland_socket(struct playos_init_state *s, int timeout_ms)
+{
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/playos-0",
+             getenv("XDG_RUNTIME_DIR") ? getenv("XDG_RUNTIME_DIR") : "/run/playos");
+
+    for (int waited = 0; waited < timeout_ms; waited += 20) {
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd >= 0) {
+            if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+                close(fd);
+                playos_log_write(s, "init",
+                                 "compositor Wayland socket ready after %d ms",
+                                 waited);
+                return;
+            }
+            close(fd);
+        }
+        usleep(20000);
+    }
+
+    playos_log_write(s, "init",
+                     "WARN: Wayland socket not ready after %d ms - starting the "
+                     "shell anyway", timeout_ms);
+}
+
 int main(void)
 {
     struct playos_init_state *s = &g_state;
@@ -200,9 +233,13 @@ int main(void)
          * cooldown so late ESP registration is tolerated. This stays
          * best-effort and never hard-fails boot. */
         char esp_dev[128] = {0};
-        for (int attempt = 0; attempt < 10; attempt++) {
+        for (int attempt = 0; attempt < 40; attempt++) {
+            /* S14 P1: poll fast (25 ms) instead of backing off (100, 200,
+             * 300... ms). A boot whose ESP node appears a moment late was
+             * paying ~600 ms in sleeps alone; 40 polls keep the same tolerance
+             * (1 s) but cost only the time actually needed. */
             if (attempt > 0)
-                usleep(attempt * 100000); /* 100ms, 200ms, ... up to 900ms */
+                usleep(25000);
 
             if (playos_find_partition_by_label("ESP", esp_dev,
                                                sizeof(esp_dev)) != 0)
@@ -352,7 +389,11 @@ int main(void)
         /* Compositor is running — launch the appropriate Wayland client.
          * In installer mode the installer takes the shell role (Sprint 10);
          * otherwise the shell plus the trusted in-game overlay start. */
-        usleep(500000); /* 500ms grace period for compositor to fully init */
+        /* S14 P1: wait for the compositor's Wayland socket to *accept*
+         * connections rather than sleeping a flat 500 ms. The socket is the real
+         * precondition and is normally ready within a few ms; the fixed grace
+         * period was pure added boot latency. */
+        playos_wait_for_wayland_socket(s, 2000);
         if (s->install_mode) {
             playos_supervisor_spawn_installer(s);
         } else {
