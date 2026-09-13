@@ -808,9 +808,9 @@ playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 			                 "WARN: could not release /EFI (%s) before installing "
 			                 "to %s", strerror(errno), s->installer_target_disk);
 		}
-	} else {
+	} else if (access("/EFI/..", F_OK) == 0) {
 		playos_log_write(s, "sup",
-		                 "keeping /EFI mounted (not on the install target %s)",
+		                 "/EFI is not on the install target %s — leaving it as is",
 		                 s->installer_target_disk[0]
 		                     ? s->installer_target_disk : "(unknown)");
 	}
@@ -853,29 +853,41 @@ playos_supervisor_remount_installer_efi(struct playos_init_state *s)
 }
 
 /* Base disk name of a device or mount source: "/dev/nvme0n1p1" -> "nvme0n1",
- * "/dev/sda3" -> "sda". Used to decide whether a mount sits on the install
- * target. */
+ * "/dev/sda3" -> "sda", "/dev/nvme0n1" -> "nvme0n1".
+ *
+ * Strip-the-trailing-digits parsing is not enough: "nvme0n1" itself ends in a
+ * digit, so a naive version turned the whole disk into "nvme0" and never matched
+ * its partitions - which made the installer handoff think the ESP was "not on
+ * the target" and leave /EFI mounted, so mkfs.fat later refused to format the
+ * ESP ("contains a mounted filesystem", exit 1). Ask the kernel instead: sysfs
+ * exposes `partition` for partitions and the parent directory is the disk. */
 static void
 base_disk_name(const char *dev, char *out, size_t outsz)
 {
 	const char *b = strrchr(dev, '/');
 	b = b ? b + 1 : dev;
 
-	size_t len = strlen(b);
-	size_t digits = 0;
-	while (digits < len && b[len - 1 - digits] >= '0' && b[len - 1 - digits] <= '9')
-		digits++;
-	if (digits > 0) {
-		size_t cut = len - digits;
-		if (cut > 0 && b[cut - 1] == 'p')
-			cut--;
-		len = cut;
+	char probe[192];
+	snprintf(probe, sizeof(probe), "/sys/class/block/%s/partition", b);
+	if (access(probe, F_OK) == 0) {
+		char link[192], target[256];
+		snprintf(link, sizeof(link), "/sys/class/block/%s", b);
+		ssize_t n = readlink(link, target, sizeof(target) - 1);
+		if (n > 0) {
+			target[n] = '\0';
+			char *slash = strrchr(target, '/');
+			if (slash && slash != target) {
+				*slash = '\0';
+				char *disk = strrchr(target, '/');
+				disk = disk ? disk + 1 : target;
+				snprintf(out, outsz, "%s", disk);
+				return;
+			}
+		}
 	}
-	if (len == 0)
-		len = strlen(b);
-	if (len >= outsz)
-		len = outsz - 1;
-	snprintf(out, outsz, "%.*s", (int)len, b);
+
+	/* Already a whole disk (or sysfs is unavailable): use the name as-is. */
+	snprintf(out, outsz, "%s", b);
 }
 
 /* Is `mountpoint` backed by a partition of `target` ("" = unknown target, in
