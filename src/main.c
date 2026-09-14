@@ -155,6 +155,10 @@ int main(void)
 
     print_banner();
 
+    /* S14-P1: first marker. Everything from here to the pivot used to be
+     * invisible (the persistent log needs /data, which comes later). */
+    playos_boot_mark("init start (pid=%d)", getpid());
+
     /* Stage 1: Mount virtual filesystems */
     playos_boot_stage_write(BOOT_STAGE_MOUNTS);
     if (playos_mount_virtual() != 0) {
@@ -164,8 +168,11 @@ int main(void)
         reboot(RB_HALT_SYSTEM);
     }
 
+    playos_boot_mark("virtual filesystems mounted");
+
     /* Initialize logging now that /run is available */
     playos_log_init(s);
+    playos_boot_mark("persistent log initialised");
     playos_log_write(s, "init", "playos-init starting as PID %d", getpid());
 
     /* Kernel-cmdline decisions (S14-T6). These read /proc/cmdline, so they must
@@ -193,14 +200,21 @@ int main(void)
     /* Sprint 12: start udevd and settle the device queue so /dev nodes get
      * their final ownership/group/mode (render, audio, input, ...) before
      * the compositor and games start. Best-effort, never hard-fails boot. */
+    playos_boot_mark("udev start");
     playos_udev_start(s);
+    playos_boot_mark("udev done");
 
-    /* S14-T6: recovery via holding Volume Down for 5 seconds at boot. */
+    /* S14-T6: recovery via holding Volume Down for 5 seconds at boot.
+     * S14-P1: marked because this check runs before anything else can be
+     * timed, and a stall here would be indistinguishable from udev. */
+    playos_boot_mark("recovery button check start");
     if (playos_recovery_button_held()) {
         s->recovery_mode = 1;
         playos_log_write(s, "init",
                          "recovery requested via button hold (volume down)");
     }
+
+    playos_boot_mark("recovery button check done (mode=%d)", s->recovery_mode);
 
     /* Sprint 10: detect installer boot before data-mount policy decisions. */
     s->install_mode = playos_install_mode_requested();
@@ -233,6 +247,7 @@ int main(void)
          * cooldown so late ESP registration is tolerated. This stays
          * best-effort and never hard-fails boot. */
         char esp_dev[128] = {0};
+        playos_boot_mark("ESP discovery start");
         for (int attempt = 0; attempt < 40; attempt++) {
             /* S14 P1: poll fast (25 ms) instead of backing off (100, 200,
              * 300... ms). A boot whose ESP node appears a moment late was
@@ -258,6 +273,7 @@ int main(void)
                              attempt + 1, strerror(errno));
         }
 
+        playos_boot_mark("ESP stage done (mounted=%d dev=%s)", s->efi_mounted, esp_dev);
         if (!s->efi_mounted) {
             if (esp_dev[0] != '\0') {
                 playos_log_write(s, "init",
@@ -322,10 +338,14 @@ int main(void)
     /* Sprint 11.5: hand control to the real read-only rootfs slot when the
      * active slot is a raw squashfs. Success never returns (exec /init);
      * failure falls through to the legacy initramfs boot path. */
-    playos_pivot_to_active_slot(s);
+    playos_boot_mark("pivot start");
+    /* Only reached on failure: a successful pivot execve()s a new init. */
+    playos_boot_mark("pivot returned %d (0/1 = stayed in initramfs)",
+                     playos_pivot_to_active_slot(s));
 
     /* Stage 2: Discover and mount data partition */
     playos_boot_stage_write(BOOT_STAGE_DATA_DISCOVERY);
+    playos_boot_mark("/data mount start");
     if (playos_mount_data(s) != 0) {
         if (s->install_mode) {
             /* Installer runs entirely from the removable boot medium; the
@@ -371,6 +391,7 @@ int main(void)
                      "compositor control server started on /run/playos/compositor.sock");
 
     /* Stage 3b: Thermal thresholds + EPP profile sync (Sprint 9) */
+    playos_boot_mark("/data mount done");
     playos_thermal_init(s);
 
     /* S14-T6: late recovery detection is handled *non-blocking* in the
@@ -383,6 +404,7 @@ int main(void)
 
     /* Stage 4: Spawn compositor */
     playos_boot_stage_write(BOOT_STAGE_COMPOSITOR);
+    playos_boot_mark("spawning compositor");
     if (playos_supervisor_spawn_compositor(s) != 0) {
         playos_log_write(s, "init", "WARN: compositor spawn failed");
     } else {
@@ -393,10 +415,12 @@ int main(void)
          * connections rather than sleeping a flat 500 ms. The socket is the real
          * precondition and is normally ready within a few ms; the fixed grace
          * period was pure added boot latency. */
+        playos_boot_mark("compositor ready; waiting for its Wayland socket");
         playos_wait_for_wayland_socket(s, 2000);
         if (s->install_mode) {
             playos_supervisor_spawn_installer(s);
         } else {
+            playos_boot_mark("spawning shell");
             playos_supervisor_spawn_shell(s);
             if (!s->recovery_mode)
                 playos_supervisor_spawn_overlay(s);
@@ -405,6 +429,8 @@ int main(void)
 
     /* Stage 5: System ready */
     playos_boot_stage_write(BOOT_STAGE_READY);
+    playos_boot_mark("system ready");
+    playos_boot_marks_persist(s);
     playos_log_write(s, "init", "system ready — entering supervision loop");
     if (s->install_mode) {
         dprintf(STDERR_FILENO, "\n  PlayOS — playos-installer on wlroots DRM/KMS\n");

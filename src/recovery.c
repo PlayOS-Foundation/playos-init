@@ -18,6 +18,7 @@
  */
 #define _DEFAULT_SOURCE 1
 #include "playos-init/recovery.h"
+#include "playos-init/init.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -137,6 +138,7 @@ confirm_hold(int fd, const struct trigger *tr)
 int
 playos_recovery_button_held(void)
 {
+    playos_boot_mark("recovery check: enter");
     int fd = -1;
     const struct trigger *tr = NULL;
     if (find_held_trigger(&fd, &tr) != 0)

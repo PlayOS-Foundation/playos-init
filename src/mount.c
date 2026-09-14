@@ -206,16 +206,44 @@ int playos_udev_start(struct playos_init_state *s)
     char *const trigger_argv[] = {
         "/usr/bin/udevadm", "trigger", "--action=add", NULL
     };
+    playos_boot_mark("udevadm trigger start");
     int rc = run_cmd(trigger_argv[0], trigger_argv);
+    playos_boot_mark("udevadm trigger done (rc=%d)", rc);
     if (rc != 0)
         playos_log_write(s, "udev", "WARN: udevadm trigger exited %d", rc);
 
     char *const settle_argv[] = {
         "/usr/bin/udevadm", "settle", NULL
     };
-    rc = run_cmd(settle_argv[0], settle_argv);
-    if (rc != 0)
-        playos_log_write(s, "udev", "WARN: udevadm settle exited %d", rc);
+    /* S14-P1: settle in the background instead of on the boot path.
+     *
+     * `udevadm settle` waits for the whole device queue to drain - measured
+     * 2.18 s cold in QEMU, and the missing ~2.7 s of the Ally's 6.5 s boot -
+     * but nothing on the boot path needs it: playos-init, the compositor and
+     * the shell all run as root, so /dev node ownership is not a precondition
+     * for them. udevd applies owner/group/mode as it processes the queue
+     * anyway; settle only *waits*. The real consumers are the games (uid 1001),
+     * which start seconds later from the UI - by then this has finished.
+     *
+     * The child marks its own completion so the cost stays visible in the boot
+     * timeline rather than being hidden by the optimisation. */
+    playos_boot_mark("udevadm settle handed to background");
+    pid_t settle_pid = fork();
+    if (settle_pid == 0) {
+        setsid();
+        int settle_rc = run_cmd(settle_argv[0], settle_argv);
+        playos_boot_mark("udevadm settle done in background (rc=%d)", settle_rc);
+        _exit(0);
+    }
+    if (settle_pid < 0) {
+        playos_log_write(s, "udev",
+                         "WARN: could not background udevadm settle (%s) - "
+                         "running it inline", strerror(errno));
+        rc = run_cmd(settle_argv[0], settle_argv);
+        playos_boot_mark("udevadm settle done inline (rc=%d)", rc);
+        if (rc != 0)
+            playos_log_write(s, "udev", "WARN: udevadm settle exited %d", rc);
+    }
 
     return 0;
 }
@@ -1018,6 +1046,8 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         return 1;
     }
 
+    playos_boot_mark("pivot: checking root fs type");
+
     /* If / is already squashfs, we are the exec'd init inside the real
      * root and there is nothing left to pivot. */
     FILE *mounts = fopen("/proc/mounts", "r");
@@ -1041,6 +1071,7 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
     struct boot_slot_state bs;
     boot_slot_read(PLAYOS_BOOT_JSON_PATH, &bs);
     const char *label = (bs.active_slot == 'b') ? "playos-b" : "playos-a";
+    playos_boot_mark("pivot: boot.json read (active=%c -> %s)", bs.active_slot, label);
 
     char dev[128] = {0};
     if (playos_find_partition_by_label(label, dev, sizeof(dev)) != 0) {
@@ -1054,6 +1085,7 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
 
     /* Raw slot: squashfs, read-only. Do NOT fall back to ext2/auto — the
      * live USB's playos-a is an ext2 carrier and must not be pivoted into. */
+    playos_boot_mark("pivot: mounting %s as squashfs", dev);
     if (mount(dev, "/mnt/newroot", "squashfs", MS_RDONLY, NULL) != 0) {
         playos_log_write(s, "init",
                          "active slot %s is not a raw squashfs (%s) — "
@@ -1083,6 +1115,7 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         return 1;
     }
 
+    playos_boot_mark("pivot: switch_root done, exec'ing /init");
     char *const argv[] = { "/init", NULL };
     execve("/init", argv, environ);
 

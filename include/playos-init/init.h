@@ -80,6 +80,17 @@ struct playos_restart_info {
 
 /* ── Central state ───────────────────────────────────────────────── */
 
+/* S14-P1: early boot markers (see logging.c). Readable via `dmesg` and
+ * persisted to /data/log/boot-marks.log once /data exists.
+ *
+ * The forward declaration matters: a struct tag first mentioned in a function
+ * prototype has *prototype* scope (C11 6.2.1), so without this the definition
+ * below would be a different type and every use would be a conflicting-types
+ * error. */
+struct playos_init_state;
+void playos_boot_mark(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void playos_boot_marks_persist(struct playos_init_state *s);
+
 struct playos_init_state {
     /* Boot */
     enum playos_boot_stage boot_stage;

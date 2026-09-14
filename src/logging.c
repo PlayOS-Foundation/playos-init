@@ -66,6 +66,87 @@ static void ring_append(struct playos_init_state *s, const char *line)
 
 /* ── Initialize logging ──────────────────────────────────────────── */
 
+/* Defined below; declared here because the boot-marker helper persists its
+ * summary through it. */
+void playos_log_write(struct playos_init_state *s, const char *tag,
+                      const char *fmt, ...);
+
+/* ── S14-P1: early boot markers ─────────────────────────────────────
+ * The first (initramfs) init has no persistent log: /data is not mounted yet,
+ * so everything it does before the pivot was invisible, and 2.7 s of a 6.5 s
+ * boot could not be attributed. /dev/kmsg goes to the kernel log, whose
+ * timestamps are absolute boot times, so the whole boot - kernel, first init,
+ * pivot, second init - reads as one timeline with `dmesg`. The same markers are
+ * mirrored into a tmpfs file that survives the pivot (/run is moved across), so
+ * the second init can persist them under /data. Best effort throughout: PID 1
+ * must never die here. */
+
+#define PLAYOS_BOOT_MARKS_PATH "/run/playos/boot-marks.log"
+#define PLAYOS_BOOT_MARKS_PERSIST "/data/log/boot-marks.log"
+
+void playos_boot_mark(const char *fmt, ...)
+{
+    char msg[256];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    struct timespec ts;
+    double t = 0.0;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        t = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+
+    int fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        dprintf(fd, "playos-init: %s\n", msg);
+        close(fd);
+    }
+
+    int f = open(PLAYOS_BOOT_MARKS_PATH,
+                 O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (f >= 0) {
+        dprintf(f, "[%10.3f] %s\n", t, msg);
+        close(f);
+    }
+}
+
+void playos_boot_marks_persist(struct playos_init_state *s)
+{
+    int in = open(PLAYOS_BOOT_MARKS_PATH, O_RDONLY | O_CLOEXEC);
+    if (in < 0)
+        return;
+
+    int out = open(PLAYOS_BOOT_MARKS_PERSIST,
+                   O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (out < 0) {
+        close(in);
+        return;
+    }
+
+    char buf[4096];
+    ssize_t n;
+    ssize_t total = 0;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w <= 0)
+                break;
+            off += w;
+        }
+        total += n;
+    }
+    close(in);
+    close(out);
+
+    if (s)
+        playos_log_write(s, "init",
+                         "boot marks (%ld bytes) persisted to %s",
+                         (long)total, PLAYOS_BOOT_MARKS_PERSIST);
+}
+
 void playos_log_init(struct playos_init_state *s)
 {
     /* Create log directory */
