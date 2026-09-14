@@ -1115,6 +1115,15 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         return 1;
     }
 
+    /* Carry the recovery decision across the exec: the second init starts as a
+     * fresh process and the kernel command line cannot change, so without this
+     * it must re-run the (773 ms) evdev button check. Only a first init that
+     * carries this code can set it - the ESP's initramfs is not updated by A/B
+     * payloads - so the second init still falls back to the check when the
+     * variable is absent. */
+    if (s->recovery_mode)
+        setenv("PLAYOS_RECOVERY", "1", 1);
+
     playos_boot_mark("pivot: switch_root done, exec'ing /init");
     char *const argv[] = { "/init", NULL };
     execve("/init", argv, environ);

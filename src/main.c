@@ -208,7 +208,13 @@ int main(void)
      * S14-P1: marked because this check runs before anything else can be
      * timed, and a stall here would be indistinguishable from udev. */
     playos_boot_mark("recovery button check start");
-    if (playos_recovery_button_held()) {
+    if (getenv("PLAYOS_RECOVERY")) {
+        /* Decided by the first init before the pivot: skip the (773 ms) evdev
+         * check. Absent on images whose embedded initramfs predates the
+         * hand-over, in which case the check below still runs. */
+        s->recovery_mode = 1;
+        playos_boot_mark("recovery inherited from the first init (env)");
+    } else if (playos_recovery_button_held()) {
         s->recovery_mode = 1;
         playos_log_write(s, "init",
                          "recovery requested via button hold (volume down)");
