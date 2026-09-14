@@ -105,6 +105,19 @@ int playos_mount_virtual(void)
         return -1;
     }
 
+    /* efivarfs: nothing mounts it for us (no systemd), but boot_media.c needs it
+     * to tell a live-USB boot from an installed one - the distinction that keeps
+     * boot.json accounting, the /data choice and the installer's target list
+     * honest. Best effort: without it we fall back to the older, name-based
+     * heuristics that cannot distinguish two disks sharing partition names. */
+    mkdir("/sys/firmware/efi/efivars", 0755);
+    if (mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", 0, NULL) != 0) {
+        playos_boot_mark("efivarfs mount failed (%s) - USB/installed detection "
+                         "falls back to name heuristics", strerror(errno));
+    } else {
+        playos_boot_mark("efivarfs mounted");
+    }
+
     /* /run — runtime data, tmpfs */
     if (mount("tmpfs", "/run", "tmpfs", 0, "mode=0755") != 0) {
         dprintf(STDERR_FILENO, "playos-init: mount /run failed: %s\n",
@@ -504,6 +517,7 @@ static int find_data_partition(char *device_path, size_t path_size,
 
     char root_disk[64] = {0};
     int have_root_disk = (get_root_disk(root_disk, sizeof(root_disk)) == 0);
+    int usb_boot = (playos_booted_from_usb() == 1);
 
     /* Try up to 10 times with increasing delays (100ms → 1000ms)
      * because block device detection may be asynchronous even with
@@ -513,8 +527,24 @@ static int find_data_partition(char *device_path, size_t path_size,
             usleep(attempt * 100000); /* 100ms, 200ms, 300ms... */
         }
 
-        /* Strategy 0: data partition on the disk we booted from. */
-        if (!require_removable && have_root_disk &&
+        /* Strategy 0: data partition on the disk we booted from.
+         *
+         * Skipped on a live-USB boot. get_root_disk() resolves the *mounted ESP*
+         * and playos_find_partition_by_label() matches partition *names*, so
+         * after an install the internal disk carries the same ESP/playos-data
+         * names as the stick: on a USB boot "the boot disk" can be the internal
+         * NVMe. /data then came from the internal disk, and the shell's installer
+         * listed no targets at all - it excludes the disk holding /data and skips
+         * removable media, so both disks were filtered out ("no suitable internal
+         * disk found"). The USB stick is the boot medium on a USB boot; prefer
+         * removable media (strategy 1) there. */
+        if (usb_boot && attempt == 0)
+            dprintf(STDERR_FILENO,
+                    "playos-init: live-USB boot - preferring removable media for "
+                    "/data (boot-disk lookup says %s, which may be the internal "
+                    "disk because partition names are shared)\n",
+                    have_root_disk ? root_disk : "?");
+        if (!require_removable && !usb_boot && have_root_disk &&
             find_data_on_disk(root_disk, device_path, path_size) == 0) {
             dprintf(STDERR_FILENO,
                     "playos-init: data partition on boot disk (%s): %s\n",
@@ -541,6 +571,8 @@ static int find_data_partition(char *device_path, size_t path_size,
                     dprintf(STDERR_FILENO,
                             "playos-init: data partition by label (removable): %s\n",
                             device_path);
+                    playos_boot_mark("/data = %s (removable media; usb_boot=%d)",
+                                     device_path, usb_boot);
                     return 0;
                 }
                 /* remember last non-removable match as fallback */
