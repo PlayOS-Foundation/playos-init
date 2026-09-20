@@ -1098,6 +1098,62 @@ playos_removable_esp_has_live_marker(void)
  * raw squashfs slot, or a mount failure), so the caller keeps booting from
  * the initramfs exactly as before.
  */
+/* S14-P1: honour an explicit "boot live, never pivot" switch.
+ *
+ * The firmware on the Ally reports a BootCurrent value that names a boot entry
+ * which does not exist (measured: BootCurrent = 0x0006 with only Boot0000-0002
+ * present; the stick is Boot0002 and the firmware booted it through the
+ * removable-media fallback path). So playos_booted_from_usb() cannot tell a
+ * stick boot from an installed one, and the pivot's name-based slot lookup then
+ * pivots a live boot into the installed slot - the live session silently becomes
+ * the installed system, which is why the installer saw no target at all.
+ *
+ * Until the payloads are split (a live kernel without the slot pivot, and an
+ * installed payload that keeps it), a live stick can ask for a true live session
+ * by carrying an empty marker file:
+ *
+ *     /EFI/playos/live-boot        on the stick's ESP
+ *
+ * Delete the file to restore normal behaviour. Returns 1 when the switch is set
+ * on an ESP that also carries the live-usb marker (so an installed disk cannot
+ * enable it by accident). */
+static int live_boot_forced(void)
+{
+    const char *probe = "/mnt/live-flag";
+    DIR *d = opendir("/sys/class/block");
+    if (!d)
+        return 0;
+
+    int forced = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL && !forced) {
+        if (de->d_name[0] == '.')
+            continue;
+
+        char sysp[288];
+        snprintf(sysp, sizeof(sysp), "/sys/class/block/%s/partition",
+                 de->d_name);
+        if (access(sysp, F_OK) != 0)
+            continue;
+
+        char dev[192];
+        snprintf(dev, sizeof(dev), "/dev/%s", de->d_name);
+
+        mkdir(probe, 0755);
+        if (mount(dev, probe, "vfat", MS_RDONLY, NULL) != 0)
+            continue;
+
+        char live[288], flag[288];
+        snprintf(live, sizeof(live), "%s/EFI/playos/live-usb", probe);
+        snprintf(flag, sizeof(flag), "%s/EFI/playos/live-boot", probe);
+        forced = (access(live, F_OK) == 0 && access(flag, F_OK) == 0);
+        umount(probe);
+    }
+
+    closedir(d);
+    return forced;
+}
+
 int playos_pivot_to_active_slot(struct playos_init_state *s)
 {
     /* Installer boots always run from the removable boot medium's
@@ -1148,6 +1204,18 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
     }
 
     playos_boot_mark("pivot: checking root fs type");
+
+    /* Explicit live-boot switch (see live_boot_forced): stay in the initramfs,
+     * which IS the live system. Must be checked before the slot lookup, because
+     * that lookup matches partition names and will happily find the installed
+     * disk's slot. */
+    if (live_boot_forced()) {
+        playos_log_write(s, "init",
+                         "live-boot switch set on the live medium - staying in "
+                         "the initramfs (no pivot)");
+        playos_boot_mark("pivot skipped: live-boot switch");
+        return 1;
+    }
 
     /* If / is already squashfs, we are the exec'd init inside the real
      * root and there is nothing left to pivot. */
