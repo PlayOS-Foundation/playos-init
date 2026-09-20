@@ -1117,9 +1117,78 @@ playos_removable_esp_has_live_marker(void)
  * Delete the file to restore normal behaviour. Returns 1 when the switch is set
  * on an ESP that also carries the live-usb marker (so an installed disk cannot
  * enable it by accident). */
+/* Wait - briefly - for a plugged-in USB mass-storage device to appear as a block
+ * device. On the Ally the stick finishes enumerating at ~4.1 s (uas probe) while
+ * the pivot decision happens at ~2.2 s, so without this the live marker is
+ * invisible at exactly the moment it matters - which is how a live boot kept
+ * pivoting into the installed slot.
+ *
+ * The wait only runs while a USB mass-storage *interface* exists without any
+ * `sd*` block device, so an installed boot neither waits (no stick) nor is
+ * delayed once the stick is up. */
+static int read_small(const char *path, char *out, size_t outsz)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, out, outsz - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    out[n] = '\0';
+    return 0;
+}
+
+static void wait_for_usb_storage(int timeout_ms)
+{
+    DIR *usb = opendir("/sys/bus/usb/devices");
+    if (!usb)
+        return;
+
+    for (int waited = 0; waited < timeout_ms; waited += 50) {
+        int iface = 0, block = 0;
+        struct dirent *de;
+
+        rewinddir(usb);
+        while ((de = readdir(usb)) != NULL) {
+            if (de->d_name[0] == '.')
+                continue;
+            char p[320], cls[16];
+            snprintf(p, sizeof(p), "/sys/bus/usb/devices/%s/bInterfaceClass",
+                     de->d_name);
+            if (read_small(p, cls, sizeof(cls)) == 0 &&
+                strncmp(cls, "08", 2) == 0) {
+                iface = 1;
+                break;
+            }
+        }
+
+        DIR *b = opendir("/sys/class/block");
+        if (b) {
+            while ((de = readdir(b)) != NULL) {
+                if (strncmp(de->d_name, "sd", 2) == 0) {
+                    block = 1;
+                    break;
+                }
+            }
+            closedir(b);
+        }
+
+        if (!iface || block) {
+            closedir(usb);
+            return;                 /* nothing pending: do not delay boot */
+        }
+        usleep(50000);
+    }
+    closedir(usb);
+}
+
 static int live_boot_forced(void)
 {
     const char *probe = "/mnt/live-flag";
+
+    wait_for_usb_storage(3000);
+
     DIR *d = opendir("/sys/class/block");
     if (!d)
         return 0;
