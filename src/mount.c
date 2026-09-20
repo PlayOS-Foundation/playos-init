@@ -577,13 +577,18 @@ static int find_data_partition(char *device_path, size_t path_size,
     if (have_live_disk)
         playos_boot_mark("live medium is %s (ESP carries live-usb)", live_disk);
 
-    /* Try up to 10 times with increasing delays (100ms → 1000ms)
-     * because block device detection may be asynchronous even with
-     * built-in virtio-blk. Total max wait: ~5s. */
-    for (int attempt = 0; attempt < 10; attempt++) {
-        if (attempt > 0) {
-            usleep(attempt * 100000); /* 100ms, 200ms, 300ms... */
-        }
+    /* Poll fast (25 ms) instead of backing off (100, 200, ... 1000 ms).
+     *
+     * The device node can exist before its block device is actually usable, and
+     * the backoff schedule quantised /data's arrival to its slots: measured on a
+     * live USB boot, the stick's block device became usable at ~4.1 s (the dock's
+     * hub chain - a hot-plug is ~270 ms) but the mount only succeeded at the
+     * next slot, 4.5 s later in wall time. The filesystem itself is fast (0.05 s
+     * on this stick), so the schedule was the cost. 200 polls keep the same ~5 s
+     * tolerance and spend only the time actually needed. */
+    for (int attempt = 0; attempt < 200; attempt++) {
+        if (attempt > 0)
+            usleep(25000);
 
         /* Strategy 0: data partition on the disk we booted from.
          *
