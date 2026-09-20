@@ -1305,7 +1305,24 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
     }
 
     /* The internal NVMe ESP may have been mounted instead of the USB's.
-     * Scan removable disks' ESPs too so a USB boot is still recognized. */
+     * Scan removable disks' ESPs too so a USB boot is still recognized.
+     *
+     * MEASURED on the Ally (S14-P1): the stick enumerates at ~4.1 s while this
+     * check runs at the pivot decision (~2.1 s). The ESP stage used to wait
+     * ~5.5 s, which incidentally covered that gap and is why live boots worked
+     * before; shortening it during the boot-time work removed that cover, the
+     * scan found no removable media, the internal ESP's boot.json was read and
+     * the boot pivoted into the installed slot. Wait, bounded, for the media to
+     * appear - and only when it can: a registered non-USB boot entry means the
+     * firmware definitely booted the internal disk, so there is nothing to wait
+     * for. */
+    if (!playos_removable_esp_has_live_marker() &&
+        playos_booted_from_usb() != 0) {
+        playos_boot_mark("pivot: waiting for removable media to enumerate");
+        for (int i = 0; i < 60 && !playos_removable_esp_has_live_marker(); i++)
+            usleep(50000);              /* 60 x 50 ms = up to 3 s */
+    }
+
     if (playos_removable_esp_has_live_marker()) {
         playos_log_write(s, "init",
                          "live USB marker found on removable ESP — staying "
