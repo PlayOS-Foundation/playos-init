@@ -1117,6 +1117,39 @@ playos_removable_esp_has_live_marker(void)
  * Delete the file to restore normal behaviour. Returns 1 when the switch is set
  * on an ESP that also carries the live-usb marker (so an installed disk cannot
  * enable it by accident). */
+/* Is the firmware's BootCurrent entry actually present?
+ *
+ * On the Ally, booting the USB stick through the firmware's removable-media
+ * fallback makes it report BootCurrent = 0x0006 while only Boot0000-0002 exist -
+ * the transient entry is never persisted. A *valid* BootCurrent therefore means
+ * the firmware booted a real, registered entry (the installed disk); an invalid
+ * one means it booted removable media. This is the only in-band evidence of the
+ * boot medium this firmware provides, and it gates the USB wait below so installed
+ * boots never pay for it. */
+static int boot_current_entry_exists(void)
+{
+    char cur[64];
+    int fd = open("/sys/firmware/efi/efivars/"
+                  "BootCurrent-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+                  O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 1;                       /* cannot tell: assume a real entry */
+
+    unsigned char buf[8] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    /* efivarfs prefixes four attribute bytes. */
+    if (n < 6)
+        return 1;
+
+    unsigned index = (unsigned)buf[4] | ((unsigned)buf[5] << 8);
+    char path[192];
+    snprintf(path, sizeof(path),
+             "/sys/firmware/efi/efivars/Boot%04X-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+             index);
+    return access(path, F_OK) == 0;
+}
+
 /* Wait - briefly - for a plugged-in USB mass-storage device to appear as a block
  * device. On the Ally the stick finishes enumerating at ~4.1 s (uas probe) while
  * the pivot decision happens at ~2.2 s, so without this the live marker is
@@ -1187,7 +1220,15 @@ static int live_boot_forced(void)
 {
     const char *probe = "/mnt/live-flag";
 
-    wait_for_usb_storage(3000);
+    /* Only a fallback (removable-media) boot needs to wait for USB storage to
+     * appear: on this hardware the stick enumerates ~2 s after the pivot
+     * decision, while a normal installed boot has no such device to wait for.
+     * Gating on BootCurrent keeps the wait off every installed boot. */
+    if (!boot_current_entry_exists()) {
+        playos_boot_mark("boot entry %s: waiting for USB storage",
+                         "invalid (fallback/removable boot)");
+        wait_for_usb_storage(3000);
+    }
 
     DIR *d = opendir("/sys/class/block");
     if (!d)
