@@ -1017,6 +1017,32 @@ int playos_find_partition_by_label(const char *label, char *device_path,
     return found ? 0 : -1;
 }
 
+/* Which medium did this image declare itself to be?
+ *
+ * S14-P1: the Ally has no bootloader (EFI stub, compiled-in command line), and at
+ * the moment init must decide whether to pivot the boot medium is simply not
+ * knowable: the USB device does not exist yet (measured: the stick's device node,
+ * interface and block device all appear together at ~4.1 s, because the dock's
+ * hub chain takes that long to come up - a hot-plug is ~270 ms), and the firmware
+ * reports BootCurrent = 0x0006 for *both* a stick boot and an installed boot
+ * with the stick removed. So the images now declare themselves on the command
+ * line, which is compiled in per image:
+ *
+ *   playos.live=1        the live/installer USB image
+ *   playos.installed=1   the payload the installer writes to the target ESP
+ *
+ * Returns 1 (live), -1 (installed) or 0 (an image predating both markers, where
+ * the removable-ESP check with its enumeration wait is still used). */
+int
+playos_live_boot_state(void)
+{
+    if (playos_cmdline_has_flag("playos.live=1"))
+        return 1;
+    if (playos_cmdline_has_flag("playos.installed=1"))
+        return -1;
+    return 0;
+}
+
 /* ── Pivot into active A/B rootfs slot (Sprint 11.5) ─────────────── */
 
 static int
@@ -1278,70 +1304,78 @@ int playos_pivot_to_active_slot(struct playos_init_state *s)
         return 1;
     }
 
-    /* Live-USB marker (S13.7): the image gen scripts stamp the removable
-     * ESP with EFI/playos/live-usb. A machine with a previously-installed
-     * internal PlayOS also carries a raw-squashfs playos-a slot; without
-     * this check a USB boot would pivot into that NVMe slot and silently
-     * boot the installed system instead of the live session. */
-    if (s->efi_mounted && access("/EFI/playos/live-usb", F_OK) == 0) {
+    /* ── Does this boot get to pivot at all? ──────────────────────────────
+     * Explicit declarations first, heuristics last.
+     *
+     * 1. The image declares itself (S14-P1). The command line is compiled in
+     *    per image (the Ally has no bootloader), so this is exact:
+     *      playos.live=1        the live/installer medium -> never pivot
+     *      playos.installed=1   the payload the installer wrote to the target
+     *                           -> pivot, and nothing needs waiting for
+     * 2. The mounted ESP carries the live marker (S13.7).
+     * 3. The firmware says it booted from USB.
+     * 4. Images predating the markers: removable-ESP check with a bounded wait
+     *    for USB enumeration.
+     *
+     * Only (4) pays the wait, and it is the only path that needs to guess: at
+     * this point the boot medium is genuinely unknown - measured, the stick's
+     * device node, interface and block device all appear together at ~4.1 s
+     * because the dock's hub chain takes that long (a hot-plug is ~270 ms),
+     * while this code runs at ~2.1 s; and the firmware reports BootCurrent =
+     * 0x0006 for both a stick boot and an installed boot with the stick out. */
+    const int declared = playos_live_boot_state();
+
+    if (declared == 1) {
+        playos_log_write(s, "init",
+                         "image declares a live boot (playos.live=1) - staying "
+                         "in the initramfs");
+        playos_boot_mark("pivot skipped: live image (cmdline)");
+        return 1;
+    }
+    if (declared == -1)
+        playos_boot_mark("pivot: installed image (cmdline), no detection needed");
+
+    /* The mounted ESP's own marker, when it is the medium that was booted. */
+    if (declared == 0 && s->efi_mounted &&
+        access("/EFI/playos/live-usb", F_OK) == 0) {
         playos_log_write(s, "init",
                          "live USB marker present — staying in initramfs "
                          "(skip pivot to installed slot)");
+        playos_boot_mark("pivot skipped: live marker on the mounted ESP");
         return 1;
     }
 
-    /* S14-T10 follow-up: ask the firmware what it booted. After an install the
-     * live USB and the internal disk share every partition name (ESP,
-     * playos-a, playos-b, playos-data), so ESP discovery can mount the NVMe's
-     * ESP, find no live marker there, and pivot into the *installed* slot —
-     * "boot from USB" then silently boots the installed system and the
-     * installer never appears. BootCurrent is unambiguous, so it wins whenever
-     * the firmware answers. */
-    if (playos_booted_from_usb() == 1) {
+    if (declared == 0 && playos_booted_from_usb() == 1) {
         playos_log_write(s, "init",
                          "firmware booted from USB — staying in initramfs "
                          "(live/installer medium, skip pivot)");
+        playos_boot_mark("pivot skipped: firmware USB boot");
         return 1;
     }
 
-    /* The internal NVMe ESP may have been mounted instead of the USB's.
-     * Scan removable disks' ESPs too so a USB boot is still recognized.
-     *
-     * MEASURED on the Ally (S14-P1): the stick enumerates at ~4.1 s while this
-     * check runs at the pivot decision (~2.1 s). The ESP stage used to wait
-     * ~5.5 s, which incidentally covered that gap and is why live boots worked
-     * before; shortening it during the boot-time work removed that cover, the
-     * scan found no removable media, the internal ESP's boot.json was read and
-     * the boot pivoted into the installed slot. Wait, bounded, for the media to
-     * appear - and only when it can: a registered non-USB boot entry means the
-     * firmware definitely booted the internal disk, so there is nothing to wait
-     * for. */
-    if (!playos_removable_esp_has_live_marker() &&
-        playos_booted_from_usb() != 0) {
-        playos_boot_mark("pivot: waiting for removable media to enumerate");
-        for (int i = 0; i < 60 && !playos_removable_esp_has_live_marker(); i++)
-            usleep(50000);              /* 60 x 50 ms = up to 3 s */
-    }
+    if (declared == 0) {
+        /* Scan removable disks' ESPs, waiting boundedly for them to appear. */
+        if (!playos_removable_esp_has_live_marker()) {
+            playos_boot_mark("pivot: waiting for removable media to enumerate");
+            for (int i = 0; i < 60 && !playos_removable_esp_has_live_marker(); i++)
+                usleep(50000);              /* 60 x 50 ms = up to 3 s */
+        }
 
-    if (playos_removable_esp_has_live_marker()) {
-        playos_log_write(s, "init",
-                         "live USB marker found on removable ESP — staying "
-                         "in initramfs (skip pivot to installed slot)");
-        return 1;
-    }
+        if (playos_removable_esp_has_live_marker()) {
+            playos_log_write(s, "init",
+                             "live USB marker found on removable ESP — staying "
+                             "in initramfs (skip pivot to installed slot)");
+            playos_boot_mark("pivot skipped: live medium present");
+            return 1;
+        }
 
-    playos_boot_mark("pivot: checking root fs type");
-
-    /* Explicit live-boot switch (see live_boot_forced): stay in the initramfs,
-     * which IS the live system. Must be checked before the slot lookup, because
-     * that lookup matches partition names and will happily find the installed
-     * disk's slot. */
-    if (live_boot_forced()) {
-        playos_log_write(s, "init",
-                         "live-boot switch set on the live medium - staying in "
-                         "the initramfs (no pivot)");
-        playos_boot_mark("pivot skipped: live-boot switch");
-        return 1;
+        if (live_boot_forced()) {
+            playos_log_write(s, "init",
+                             "live-boot switch set on the live medium - staying "
+                             "in the initramfs (no pivot)");
+            playos_boot_mark("pivot skipped: live-boot switch");
+            return 1;
+        }
     }
 
     /* If / is already squashfs, we are the exec'd init inside the real
