@@ -116,6 +116,9 @@ struct playos_init_state {
 
     /* Installer supervision (Sprint 10) */
     pid_t                     installer_pid;
+    int                       install_shell_driven;  /* S14.5-T3: the worker, not the
+                                                       * standalone installer, is
+                                                       * running this install */
     struct playos_restart_info installer_restarts;
     int                       install_mode;        /* booted with playos.mode=install */
     int                       installer_runtime_mode; /* S13.7: started via StartInstaller IPC */

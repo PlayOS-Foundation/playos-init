@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <sys/reboot.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 
 #include "playos-init/init.h"
@@ -697,6 +698,18 @@ static void installer_restart(struct playos_init_state *s)
 void playos_supervisor_installer_exited(struct playos_init_state *s,
                                         int exit_code, int signal_num)
 {
+	/* S14.5-T3: a shell-driven install whose worker died must surface as an error
+	 * rather than a progress bar that never advances - the shell has no other way
+	 * to learn the worker is gone. */
+	if (s->install_shell_driven && (exit_code != 0 || signal_num != 0)) {
+		char reason[128];
+		snprintf(reason, sizeof(reason), "install worker exited (code=%d signal=%d)",
+		         exit_code, signal_num);
+		playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_INSTALL_ERROR, reason);
+		playos_log_write(s, "sup", "%s", reason);
+	}
+	s->install_shell_driven = 0;
+
 	s->installer_restarts.last_exit_code = exit_code;
 	s->installer_restarts.last_signal = signal_num;
 
@@ -842,6 +855,81 @@ wait_child_exit(struct playos_init_state *s, pid_t pid, int timeout_ms)
  * handler and the headless playos.install.auto cmdline token. Returns 0 on
  * success (installer spawned, reboot-on-exit armed) or -1 on failure (shell +
  * overlay respawned, live session kept). */
+/* S14.5-T3: make the install payload visible at /mnt/payload. init owns this
+ * because it knows the boot medium and already has the partition lookup; the
+ * worker is deliberately discovery-free. The boot-time installer mounts its own
+ * payload, so an already-mounted path is fine. */
+static int
+mount_install_payload(struct playos_init_state *s)
+{
+	if (access("/mnt/payload/rootfs.squashfs", R_OK) == 0)
+		return 0;
+
+	(void)mkdir("/mnt/payload", 0755);
+
+	char dev[128] = {0};
+	if (playos_find_partition_by_label("playos-a", dev, sizeof(dev)) != 0) {
+		playos_log_write(s, "sup", "install payload: no playos-a partition found");
+		return -1;
+	}
+
+	if (mount(dev, "/mnt/payload", "ext4", MS_RDONLY, NULL) != 0 &&
+	    mount(dev, "/mnt/payload", "ext2", MS_RDONLY, NULL) != 0) {
+		playos_log_write(s, "sup", "install payload: mounting %s failed: %s",
+		                 dev, strerror(errno));
+		return -1;
+	}
+
+	if (access("/mnt/payload/rootfs.squashfs", R_OK) != 0) {
+		playos_log_write(s, "sup",
+		                 "install payload: %s carries no rootfs.squashfs", dev);
+		(void)umount("/mnt/payload");
+		return -1;
+	}
+
+	playos_log_write(s, "sup", "install payload mounted from %s", dev);
+	return 0;
+}
+
+int
+playos_supervisor_start_install_worker(struct playos_init_state *s,
+                                       const char *target_disk)
+{
+	if (!target_disk || !target_disk[0]) {
+		playos_log_write(s, "sup", "install worker: no target disk");
+		return -1;
+	}
+	if (s->installer_pid > 0) {
+		playos_log_write(s, "sup", "install worker: already running (PID %d)",
+		                 s->installer_pid);
+		return 0;
+	}
+	if (mount_install_payload(s) != 0)
+		return -1;
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		playos_log_write(s, "sup", "install worker: fork failed: %s", strerror(errno));
+		return -1;
+	}
+	if (pid == 0) {
+		setsid();
+		setenv("XDG_RUNTIME_DIR", "/run/playos", 1);
+		setenv("PLAYOS_INSTALL_TARGET", target_disk, 1);
+		setenv("PLAYOS_INSTALL_PAYLOAD", "/mnt/payload", 1);
+		child_log_redirect("/data/log/install-worker.log");
+		execl("/usr/bin/playos-install-worker", "playos-install-worker", (char *)NULL);
+		_exit(127);
+	}
+
+	s->installer_pid = pid;
+	s->install_shell_driven = 1;
+	playos_log_write(s, "sup",
+	                 "install worker started (PID %d, target %s) - shell keeps the screen",
+	                 pid, target_disk);
+	return 0;
+}
+
 int
 playos_supervisor_start_runtime_installer(struct playos_init_state *s)
 {

@@ -68,6 +68,13 @@ void playos_supervisor_spawn_installer(struct playos_init_state *s);
  * the target holds. */
 int  playos_mount_is_on_target(const char *mountpoint, const char *target);
 
+/* S14.5-T3: start the screen-less install worker. Unlike the standalone handoff
+ * this keeps the shell, overlay, compositor and SSH exactly as they are - the
+ * worker has no surface and the shell draws the progress. Returns 0 when the
+ * worker is running. */
+int  playos_supervisor_start_install_worker(struct playos_init_state *s,
+                                            const char *target_disk);
+
 /* Best-effort restore of an ESP released for the install (failed-install path). */
 void playos_supervisor_remount_installer_efi(struct playos_init_state *s);
 void playos_supervisor_stop_shell_and_overlay(struct playos_init_state *s);

@@ -447,6 +447,26 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
         playos_ipc_message_free(&msg);
 
+        /* S14.5-T3: when a shell is listening it can draw the progress itself, so
+         * run the screen-less worker and leave the session exactly as it is - no
+         * printk suppression, no VT blanking, no stopping shell/overlay/SSH. The
+         * standalone installer and its handoff remain for the case where nobody
+         * can draw progress: boot-time installs, playos.install.auto, recovery. */
+        if (s->shell_listener_fd >= 0) {
+            if (playos_supervisor_start_install_worker(s, s->installer_target_disk) != 0) {
+                playos_log_write(s, "ipc",
+                                 "StartInstaller: cannot start the install worker");
+                send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ERROR);
+                playos_ipc_message_free(&msg);
+                return -1;
+            }
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
+            playos_log_write(s, "ipc",
+                             "StartInstaller: worker started, shell keeps the screen");
+            playos_ipc_message_free(&msg);
+            return 0;
+        }
+
         /* Shared runtime handoff: stop shell+overlay, release the target,
          * spawn the installer (or respawn shell+overlay on failure). */
         if (playos_supervisor_start_runtime_installer(s) != 0)
