@@ -422,6 +422,54 @@ static int get_root_disk(char *disk, size_t size)
 /* Find the playos-data partition that lives on `root_disk`. When more than
  * one candidate exists (a stale slot-B superblock left by an older layout),
  * prefer the highest partition number — data is always the last partition. */
+/* Identify the live/installer medium: the disk whose ESP carries the marker the
+ * live image writes (EFI/playos/live-usb). This is the only reliable signal -
+ * partition names ("ESP", "playos-data", "playos-a") are shared with an
+ * installed internal disk, and the sysfs `removable` flag reports 0 for a stick
+ * behind a dock or hub.
+ *
+ * Returns 0 and fills `disk` with the whole-disk sysfs name when found. */
+static int find_live_usb_disk(char *disk, size_t size)
+{
+    const char *probe = "/mnt/live-probe";
+    DIR *d = opendir("/sys/class/block");
+    if (!d)
+        return -1;
+
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.')
+            continue;
+
+        char part_file[256];
+        snprintf(part_file, sizeof(part_file),
+                 "/sys/class/block/%s/partition", de->d_name);
+        if (access(part_file, F_OK) != 0)
+            continue;                       /* not a partition */
+
+        char dev[192];
+        snprintf(dev, sizeof(dev), "/dev/%s", de->d_name);
+
+        mkdir(probe, 0755);
+        if (mount(dev, probe, "vfat", MS_RDONLY, NULL) != 0)
+            continue;
+
+        char marker[288];
+        snprintf(marker, sizeof(marker), "%s/EFI/playos/live-usb", probe);
+        int is_live = (access(marker, F_OK) == 0);
+        umount(probe);
+
+        if (is_live) {
+            partition_parent_disk(de->d_name, disk, size);
+            closedir(d);
+            return (disk[0] != '\0') ? 0 : -1;
+        }
+    }
+
+    closedir(d);
+    return -1;
+}
+
 static int find_data_on_disk(const char *root_disk, char *device_path,
                              size_t path_size)
 {
@@ -519,6 +567,16 @@ static int find_data_partition(char *device_path, size_t path_size,
     int have_root_disk = (get_root_disk(root_disk, sizeof(root_disk)) == 0);
     int usb_boot = (playos_booted_from_usb() == 1);
 
+    /* No block-device root means this is a live/installer boot (the initramfs is
+     * /), so strategy 0 cannot fire and the by-label symlink is a coin flip
+     * between the stick and an installed disk carrying the same "playos-data"
+     * label. Identify the live medium by its ESP marker instead. */
+    char live_disk[64] = {0};
+    int have_live_disk = (!have_root_disk &&
+                          find_live_usb_disk(live_disk, sizeof(live_disk)) == 0);
+    if (have_live_disk)
+        playos_boot_mark("live medium is %s (ESP carries live-usb)", live_disk);
+
     /* Try up to 10 times with increasing delays (100ms → 1000ms)
      * because block device detection may be asynchronous even with
      * built-in virtio-blk. Total max wait: ~5s. */
@@ -549,6 +607,17 @@ static int find_data_partition(char *device_path, size_t path_size,
             dprintf(STDERR_FILENO,
                     "playos-init: data partition on boot disk (%s): %s\n",
                     root_disk, device_path);
+            return 0;
+        }
+
+        /* Strategy 0b: the live medium's data partition. Runs before the
+         * by-label fallback so a live session never adopts the internal disk's
+         * /data - which left the installer with no targets (it excludes the disk
+         * holding /data) and exposed the internal boot.json to live boots. */
+        if (have_live_disk &&
+            find_data_on_disk(live_disk, device_path, path_size) == 0) {
+            playos_boot_mark("/data = %s (live medium %s)",
+                             device_path, live_disk);
             return 0;
         }
 
