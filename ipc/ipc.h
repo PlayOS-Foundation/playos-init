@@ -83,6 +83,20 @@ extern "C" {
 /* init → shell (async events) */
 #define PLAYOS_IPC_TYPE_UPDATE_PROGRESS    "UpdateProgress"
 #define PLAYOS_IPC_TYPE_UPDATE_COMPLETE    "UpdateComplete"
+
+/* ── Install progress (Sprint 14.5-T2) ──────────────────────────────────
+ * PrepareInstall asks init to validate the target and release its mounts
+ * *before* the shell commits to a progress screen, so a doomed install fails
+ * while the user is still on the picker. The screen-less worker then reports
+ * InstallProgress / InstallComplete / InstallError, which init relays to the
+ * registered shell listener - the shell never talks to the worker, exactly as
+ * the update path relays UpdateProgress. */
+#define PLAYOS_IPC_TYPE_PREPARE_INSTALL        "PrepareInstall"
+#define PLAYOS_IPC_TYPE_PREPARE_INSTALL_ACK    "PrepareInstallAck"
+#define PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR  "PrepareInstallError"
+#define PLAYOS_IPC_TYPE_INSTALL_PROGRESS       "InstallProgress"
+#define PLAYOS_IPC_TYPE_INSTALL_COMPLETE       "InstallComplete"
+#define PLAYOS_IPC_TYPE_INSTALL_ERROR          "InstallError"
 #define PLAYOS_IPC_TYPE_UPDATE_ERROR       "UpdateError"
 
 /* ── Lifecycle event constants ─────────────────────────────── */

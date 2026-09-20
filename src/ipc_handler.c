@@ -316,6 +316,92 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         return -1;
     }
 
+    /* ── PrepareInstall (Sprint 14.5-T2) ─────────────────────────────────
+     * Validate the target and release its mounts *before* the shell commits to
+     * a progress screen, so a doomed install fails while the user is still on
+     * the picker. The engine releases mounts again in step 0 - this is the early
+     * answer the shell needs, not a replacement. */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_PREPARE_INSTALL) == 0) {
+        char target[64] = {0};
+        {
+            const char *p = strstr(msg.json_raw, "\"target_disk\"");
+            if (p)
+                p = strchr(p, ':');
+            if (p)
+                p = strchr(p, '"');
+            if (p) {
+                const char *end = strchr(p + 1, '"');
+                if (end && (size_t)(end - (p + 1)) < sizeof(target))
+                    memcpy(target, p + 1, (size_t)(end - (p + 1)));
+            }
+        }
+
+        char dev[96];
+        if (target[0] == '/')
+            snprintf(dev, sizeof(dev), "%s", target);
+        else
+            snprintf(dev, sizeof(dev), "/dev/%s", target);
+
+        playos_log_write(s, "ipc", "PrepareInstall requested for %s", dev);
+
+        if (!target[0] || access(dev, F_OK) != 0) {
+            playos_log_write(s, "ipc",
+                             "PrepareInstall rejected: %s is not present", dev);
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR);
+        } else if (playos_mount_is_on_target("/", target) ||
+                   playos_mount_is_on_target("/data", target)) {
+            /* The disk holding the running root or /data would be erased by the
+             * install: refuse rather than let the user commit to it. */
+            playos_log_write(s, "ipc",
+                             "PrepareInstall rejected: %s holds the running "
+                             "system or /data", target);
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR);
+        } else {
+            /* Release the target's own mounts: on a live session its ESP is
+             * usually mounted as /EFI, which makes mkfs refuse the target. */
+            if (playos_mount_is_on_target("/EFI", target)) {
+                playos_log_write(s, "ipc",
+                                 "PrepareInstall: releasing /EFI (on target %s)",
+                                 target);
+                (void)umount("/EFI");
+                s->efi_mounted = 0;
+            }
+            playos_log_write(s, "ipc", "PrepareInstall ok for %s", dev);
+            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_PREPARE_INSTALL_ACK);
+        }
+
+        playos_ipc_message_free(&msg);
+        return 0;
+    }
+
+    /* ── Install progress relay (Sprint 14.5-T2) ─────────────────────────
+     * The screen-less worker reports progress like any other client; init
+     * forwards it to the registered shell listener, exactly as UpdateProgress
+     * is forwarded. The shell never talks to the worker. */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_INSTALL_PROGRESS) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_INSTALL_COMPLETE) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_INSTALL_ERROR) == 0) {
+        /* json_raw is the worker's whole body, so forward only what follows its
+         * "type" field: emit_to_shell re-adds v/type, and passing the body
+         * verbatim would duplicate them. Workers therefore put their payload
+         * after the type, which the IPC builder does for them. */
+        const char *fields = NULL;
+        const char *colon = strstr(msg.json_raw, "\"type\"");
+        colon = colon ? strchr(colon, ':') : NULL;
+        const char *q1 = colon ? strchr(colon, '"') : NULL;
+        const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+        if (q2) {
+            fields = q2 + 1;
+            while (*fields == ',' || *fields == ' ')
+                fields++;
+            if (*fields == '\0' || *fields == '}')
+                fields = NULL;
+        }
+        playos_ipc_emit_to_shell(s, msg.type, fields);
+        playos_ipc_message_free(&msg);
+        return 0;
+    }
+
     /* ── StartInstaller (Sprint 13.7) ───────────────────────── */
     if (strcmp(msg.type, PLAYOS_IPC_TYPE_START_INSTALLER) == 0) {
         playos_log_write(s, "ipc", "StartInstaller requested via IPC");
