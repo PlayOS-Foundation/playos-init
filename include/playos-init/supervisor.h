@@ -73,7 +73,8 @@ int  playos_mount_is_on_target(const char *mountpoint, const char *target);
  * worker has no surface and the shell draws the progress. Returns 0 when the
  * worker is running. */
 int  playos_supervisor_start_install_worker(struct playos_init_state *s,
-                                            const char *target_disk);
+                                            const char *target_disk,
+                                            const char *payload_device);
 
 /* Best-effort restore of an ESP released for the install (failed-install path). */
 void playos_supervisor_remount_installer_efi(struct playos_init_state *s);

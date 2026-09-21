@@ -36,6 +36,9 @@
 
 /* IPC framing from playos-runtime (bundled source) */
 #include "ipc.h"
+/* Defined below; used by the PrepareInstall handler. */
+static void send_prepare_error(int client_fd, const char *reason);
+
 
 extern void playos_log_write(struct playos_init_state *s, const char *tag,
                              const char *fmt, ...)
@@ -347,7 +350,7 @@ static int handle_message(struct playos_init_state *s, int client_fd,
         if (!target[0] || access(dev, F_OK) != 0) {
             playos_log_write(s, "ipc",
                              "PrepareInstall rejected: %s is not present", dev);
-            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR);
+            send_prepare_error(client_fd, "target is not present");
         } else if (playos_mount_is_on_target("/", target) ||
                    playos_mount_is_on_target("/data", target)) {
             /* The disk holding the running root or /data would be erased by the
@@ -355,7 +358,7 @@ static int handle_message(struct playos_init_state *s, int client_fd,
             playos_log_write(s, "ipc",
                              "PrepareInstall rejected: %s holds the running "
                              "system or /data", target);
-            send_simple_ack(client_fd, PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR);
+            send_prepare_error(client_fd, "target holds the running system or /data");
         } else {
             /* Release the target's own mounts: on a live session its ESP is
              * usually mounted as /EFI, which makes mkfs refuse the target. */
@@ -430,6 +433,27 @@ static int handle_message(struct playos_init_state *s, int client_fd,
             playos_log_write(s, "ipc", "StartInstaller target disk: %s",
                              s->installer_target_disk);
 
+        /* S14.5-T5: the shell passes the payload partition it verified by
+         * contents. Looking the payload up by name here is ambiguous - the
+         * internal disk has a playos-a of its own (a squashfs slot), and every
+         * name-based lookup may land on it. */
+        char payload_dev[64] = {0};
+        {
+            const char *p = strstr(msg.json_raw, "\"payload_device\"");
+            if (p)
+                p = strchr(p, ':');
+            if (p)
+                p = strchr(p, '"');
+            if (p) {
+                const char *end = strchr(p + 1, '"');
+                if (end && (size_t)(end - (p + 1)) < sizeof(payload_dev))
+                    memcpy(payload_dev, p + 1, (size_t)(end - (p + 1)));
+            }
+        }
+        if (payload_dev[0])
+            playos_log_write(s, "ipc", "StartInstaller payload device: %s",
+                             payload_dev);
+
         if (s->install_mode) {
             /* Boot-time installer already running: ack, no-op. */
             send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ACK);
@@ -453,7 +477,8 @@ static int handle_message(struct playos_init_state *s, int client_fd,
          * standalone installer and its handoff remain for the case where nobody
          * can draw progress: boot-time installs, playos.install.auto, recovery. */
         if (s->shell_listener_fd >= 0) {
-            if (playos_supervisor_start_install_worker(s, s->installer_target_disk) != 0) {
+            if (playos_supervisor_start_install_worker(s, s->installer_target_disk,
+                                                              payload_dev) != 0) {
                 playos_log_write(s, "ipc",
                                  "StartInstaller: cannot start the install worker");
                 send_simple_ack(client_fd, PLAYOS_IPC_TYPE_START_INSTALLER_ERROR);
@@ -1098,6 +1123,26 @@ static int handle_compositor_message(struct playos_init_state *s, int fd,
 /*
  * Emit an asynchronous event to the persistent shell listener.
  */
+/* S14.5-T2/T4: a rejected PrepareInstall explains itself, so the shell's error
+ * card can say why instead of "failed". */
+static void
+send_prepare_error(int client_fd, const char *reason)
+{
+    char fields[192];
+    snprintf(fields, sizeof(fields), "\"reason\":\"%s\"", reason ? reason : "");
+
+    struct playos_ipc_message msg;
+    memset(&msg, 0, sizeof(msg));
+    if (playos_ipc_message_from_type(PLAYOS_IPC_PROTOCOL_VERSION,
+                                     PLAYOS_IPC_TYPE_PREPARE_INSTALL_ERROR,
+                                     fields, &msg) != 0)
+        return;
+    (void)playos_ipc_frame_write(client_fd, &msg);
+}
+
+/* Defined below; used by the PrepareInstall handler. */
+static void send_prepare_error(int client_fd, const char *reason);
+
 void playos_ipc_emit_to_shell(struct playos_init_state *s, const char *type,
                               const char *extra_json)
 {

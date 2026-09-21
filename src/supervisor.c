@@ -860,7 +860,7 @@ wait_child_exit(struct playos_init_state *s, pid_t pid, int timeout_ms)
  * worker is deliberately discovery-free. The boot-time installer mounts its own
  * payload, so an already-mounted path is fine. */
 static int
-mount_install_payload(struct playos_init_state *s)
+mount_install_payload(struct playos_init_state *s, const char *device)
 {
 	if (access("/mnt/payload/rootfs.squashfs", R_OK) == 0)
 		return 0;
@@ -868,7 +868,10 @@ mount_install_payload(struct playos_init_state *s)
 	(void)mkdir("/mnt/payload", 0755);
 
 	char dev[128] = {0};
-	if (playos_find_partition_by_label("playos-a", dev, sizeof(dev)) != 0) {
+	if (device && device[0]) {
+		/* The shell verified this partition by contents; prefer it. */
+		snprintf(dev, sizeof(dev), "%s", device);
+	} else if (playos_find_partition_by_label("playos-a", dev, sizeof(dev)) != 0) {
 		playos_log_write(s, "sup", "install payload: no playos-a partition found");
 		return -1;
 	}
@@ -893,7 +896,8 @@ mount_install_payload(struct playos_init_state *s)
 
 int
 playos_supervisor_start_install_worker(struct playos_init_state *s,
-                                       const char *target_disk)
+                                       const char *target_disk,
+                                       const char *payload_device)
 {
 	if (!target_disk || !target_disk[0]) {
 		playos_log_write(s, "sup", "install worker: no target disk");
@@ -904,7 +908,7 @@ playos_supervisor_start_install_worker(struct playos_init_state *s,
 		                 s->installer_pid);
 		return 0;
 	}
-	if (mount_install_payload(s) != 0)
+	if (mount_install_payload(s, payload_device) != 0)
 		return -1;
 
 	pid_t pid = fork();
