@@ -1352,6 +1352,52 @@ int playos_supervisor_generate_launch_token(struct playos_init_state *s)
     return 0;
 }
 
+/*
+ * S15-T7: launch a game by id through the same path as the shell's LaunchGame
+ * IPC request. Shared by the IPC handler and the `playos.autostart` emulator
+ * hook. Returns the game PID, or -1 when a game is already running or the
+ * spawn fails.
+ */
+pid_t playos_supervisor_launch_game(struct playos_init_state *s,
+                                    const char *game_id,
+                                    const char *manifest_path)
+{
+    if (!s)
+        return -1;
+
+    if (!game_id || game_id[0] == '\0') {
+        playos_log_write(s, "sup", "launch rejected: missing game id");
+        return -1;
+    }
+
+    if (s->game_pid != 0 || s->game_state != GAME_NONE) {
+        playos_log_write(s, "sup", "launch rejected: game already running");
+        return -1;
+    }
+
+    playos_supervisor_generate_launch_token(s);
+
+    /* Tell the compositor which game to expect before the process starts. */
+    char expected_json[384];
+    snprintf(expected_json, sizeof(expected_json),
+             "\"launch_token\":\"%s\",\"game_id\":\"%s\"",
+             s->launch_token, game_id);
+    playos_compositor_send(s, PLAYOS_IPC_TYPE_SET_EXPECTED_GAME, expected_json);
+
+    pid_t pid = playos_supervisor_spawn_game(s, game_id, manifest_path);
+    if (pid <= 0)
+        return -1;
+
+    /* Notify the shell asynchronously that a game started. */
+    char started_json[384];
+    snprintf(started_json, sizeof(started_json),
+             "\"game_id\":\"%s\",\"pid\":%d,\"launch_token\":\"%s\"",
+             game_id, s->game_pid, s->launch_token);
+    playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_GAME_STARTED, started_json);
+
+    return pid;
+}
+
 pid_t playos_supervisor_spawn_game(struct playos_init_state *s,
                                     const char *game_id,
                                     const char *manifest_path)

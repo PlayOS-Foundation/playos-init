@@ -18,6 +18,7 @@
 
 #include "playos-init/init.h"
 #include "playos-init/mount.h"
+#include "playos-init/cmdline.h"
 #include "playos-init/boot_slot.h"
 #include "playos-init/boot_media.h"
 
@@ -899,6 +900,25 @@ int playos_auto_install_requested(void)
 int playos_recovery_requested(void)
 {
     return playos_cmdline_has_flag("playos.recovery");
+}
+
+/* S15-T7: `playos.autostart=<game-id>` — the emulator/debug launch hook.
+ * Reads /proc/cmdline and defers to the pure parser so the syntax is
+ * host-tested; returns 0 when /proc is not mounted yet so the caller can
+ * retry from the supervision loop. */
+int playos_autostart_game(char *out, size_t outsz)
+{
+    FILE *cmdline = fopen("/proc/cmdline", "r");
+    if (!cmdline)
+        return 0;
+
+    char buf[4096] = {0};
+    int rc = 0;
+    if (fgets(buf, sizeof(buf), cmdline))
+        rc = playos_cmdline_autostart(buf, out, outsz);
+
+    fclose(cmdline);
+    return rc;
 }
 
 /* ── A/B boot slot partition lookup (Sprint 11) ───────────────────── */

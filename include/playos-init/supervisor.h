@@ -18,6 +18,16 @@ pid_t playos_supervisor_spawn_game(struct playos_init_state *state,
                                     const char *game_id,
                                     const char *manifest_path);
 
+/* S15-T7: launch a game by id through the exact path the shell's LaunchGame
+ * IPC request uses — generate a per-launch token, tell the compositor which
+ * game to expect, spawn under the S12 sandbox, and emit GameStarted to the
+ * shell. Shared by the IPC handler and the `playos.autostart` emulator hook.
+ * Returns the game PID, or -1 when a game is already running or the spawn
+ * fails. */
+pid_t playos_supervisor_launch_game(struct playos_init_state *state,
+                                    const char *game_id,
+                                    const char *manifest_path);
+
 /* Terminate a running game. force=0 for SIGTERM, force=1 for immediate SIGKILL. */
 int playos_supervisor_terminate_game(struct playos_init_state *state, int force);
 

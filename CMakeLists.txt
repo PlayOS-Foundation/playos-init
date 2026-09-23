@@ -21,6 +21,7 @@ set(PLAYOS_INIT_SOURCES
     src/main.c
     src/init.c
     src/mount.c
+    src/cmdline.c
     src/logging.c
     src/supervisor.c
     src/shutdown.c
@@ -50,6 +51,7 @@ set(PLAYOS_INIT_SOURCES
 set(PLAYOS_INIT_HEADERS
     include/playos-init/init.h
     include/playos-init/mount.h
+    include/playos-init/cmdline.h
     include/playos-init/supervisor.h
     include/playos-init/shutdown.h
     include/playos-init/thermal.h
@@ -154,6 +156,15 @@ if(BUILD_TESTS)
     target_include_directories(test_hwmon_names PRIVATE include)
     target_compile_options(test_hwmon_names PRIVATE -Wall -Wextra)
     add_test(NAME hwmon_names COMMAND test_hwmon_names)
+
+    # S15-T7: kernel command-line parsing (playos.autostart)
+    add_executable(test_cmdline
+        tests/host/test_cmdline.c
+        src/cmdline.c
+    )
+    target_include_directories(test_cmdline PRIVATE include)
+    target_compile_options(test_cmdline PRIVATE -Wall -Wextra)
+    add_test(NAME cmdline COMMAND test_cmdline)
 
     # Boot slot + update verification/apply test. The test provides its own
     # playos_find_partition_by_label() seam, so mount.c is intentionally not

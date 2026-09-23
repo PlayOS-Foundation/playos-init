@@ -501,6 +501,32 @@ int main(void)
             playos_supervisor_start_runtime_installer(s);
         }
 
+        /* S15-T7: emulator/debug autostart. `playos.autostart=<game-id>` makes
+         * init launch the named game through the same path as a LaunchGame IPC
+         * request. Wait until the session is actually ready — the compositor
+         * control connection and the shell listener both registered — or
+         * SetExpectedGame is dropped and the shell never hears GameStarted (the
+         * game then renders but the compositor cannot classify it). The SDK
+         * emulator profile uses this hook so a device build can be verified
+         * without a person driving the shell UI. Any failure is logged and the
+         * session continues; production images never set the token. */
+        static int autostart_triggered = 0;
+        if (!autostart_triggered && !s->install_mode && !s->recovery_mode &&
+            s->compositor_state == COMPOSITOR_RUNNING &&
+            s->compositor_conn_fd >= 0 && s->shell_listener_fd >= 0) {
+            char autostart_id[128];
+            if (playos_autostart_game(autostart_id, sizeof(autostart_id)) > 0) {
+                autostart_triggered = 1;
+                playos_log_write(s, "init",
+                                 "autostart requested - launching game %s",
+                                 autostart_id);
+                if (playos_supervisor_launch_game(s, autostart_id, NULL) <= 0)
+                    playos_log_write(s, "init",
+                                     "autostart: game %s did not start",
+                                     autostart_id);
+            }
+        }
+
         /* Process incoming IPC connections */
         playos_ipc_server_poll(s);
         playos_compositor_server_poll(s);

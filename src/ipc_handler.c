@@ -577,27 +577,10 @@ static int handle_message(struct playos_init_state *s, int client_fd,
                          game_id,
                          manifest_path[0] ? manifest_path : "(none)");
 
-        /* Generate a per-launch token and tell the compositor which game
-         * to expect before the process starts. */
-        playos_supervisor_generate_launch_token(s);
-
-        char expected_json[384];
-        snprintf(expected_json, sizeof(expected_json),
-                 "\"launch_token\":\"%s\",\"game_id\":\"%s\"",
-                 s->launch_token, game_id);
-        playos_compositor_send(s, PLAYOS_IPC_TYPE_SET_EXPECTED_GAME,
-                               expected_json);
-
-        /* Spawn the game process */
-        if (playos_supervisor_spawn_game(s, game_id, manifest_path) > 0) {
-            /* Notify the shell asynchronously that a game started. */
-            char started_json[384];
-            snprintf(started_json, sizeof(started_json),
-                     "\"game_id\":\"%s\",\"pid\":%d,\"launch_token\":\"%s\"",
-                     game_id, s->game_pid, s->launch_token);
-            playos_ipc_emit_to_shell(s, PLAYOS_IPC_TYPE_GAME_STARTED,
-                                     started_json);
-
+        /* Launch through the shared path (S15-T7): generate a per-launch
+         * token, tell the compositor which game to expect, spawn the game,
+         * and emit GameStarted to the shell. */
+        if (playos_supervisor_launch_game(s, game_id, manifest_path) > 0) {
             /* Game started — send acknowledgment as single SOCK_SEQPACKET frame */
             char ack_json[384];
             int ack_len = snprintf(ack_json, sizeof(ack_json),
