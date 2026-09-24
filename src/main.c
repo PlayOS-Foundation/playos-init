@@ -567,6 +567,9 @@ int main(void)
             last_housekeeping_ms = housekeeping_now_ms;
             playos_supervisor_lifecycle_tick(s);
             playos_thermal_tick(s);
+            /* Idempotent: starts the network stack once the radio's interface
+             * exists (mt7921e probes asynchronously, after the first call). */
+            playos_supervisor_start_network(s);
         }
 
         /* Loop start time for the time-based one-shot ticks below. The loop

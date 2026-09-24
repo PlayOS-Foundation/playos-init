@@ -125,6 +125,7 @@ struct playos_net_sup {
     struct playos_restart_info net_restarts;
     char  ifname[32];
     int   started;
+    int   attempts;      /* interface-discovery attempts so far */
 };
 
 static struct playos_net_sup g_net;
@@ -282,19 +283,33 @@ void playos_supervisor_start_network(struct playos_init_state *s)
 {
     if (g_net.started)
         return;
-    g_net.started = 1;
-
-    /* A live/installer/recovery boot has no business associating. */
+    /* A live/installer/recovery boot has no business associating: give up for
+     * good so the housekeeping tick stops calling us. */
     if (s->install_mode || s->recovery_mode) {
+        g_net.started = 1;
         playos_log_write(s, "net", "network stack not started (install/recovery)");
         return;
     }
 
     net_prepare_runtime_dir(s);
 
+    /* The radio is probed asynchronously: on a cold boot mt7921e creates its
+     * interface *after* this runs (measured: init looks at 2.55s, wlp6s0
+     * appears at 2.92s). Sampling once and giving up left the whole network
+     * stack dead for the session — so wait for it instead. Bounded, and free
+     * because the caller is the 1 Hz housekeeping tick. */
     if (net_wireless_ifname(g_net.ifname, sizeof(g_net.ifname)) != 0) {
-        playos_log_write(s, "net",
-                         "no wireless interface found - network stack not started");
+        g_net.attempts++;
+        if (g_net.attempts == 1 || g_net.attempts % 10 == 0)
+            playos_log_write(s, "net",
+                             "waiting for a wireless interface (attempt %d)",
+                             g_net.attempts);
+        if (g_net.attempts >= 60) {
+            g_net.started = 1;
+            playos_log_write(s, "net",
+                             "no wireless interface after %d tries - network "
+                             "stack not started", g_net.attempts);
+        }
         return;
     }
 
@@ -302,6 +317,7 @@ void playos_supervisor_start_network(struct playos_init_state *s)
     spawn_wpa_supplicant(s);
     spawn_dhcpcd(s);
     spawn_playos_net(s);      /* retries the wpa control socket itself */
+    g_net.started = 1;
     playos_log_write(s, "net", "network stack started (if=%s)", g_net.ifname);
 }
 
