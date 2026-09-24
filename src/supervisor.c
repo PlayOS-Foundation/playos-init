@@ -256,8 +256,20 @@ static void spawn_dhcpcd(struct playos_init_state *s)
 
     if (pid == 0) {
         child_log_redirect("/data/log/dhcpcd-stderr.log");
-        /* -B keeps dhcpcd in the foreground so init supervises the real PID. */
-        execl("/sbin/dhcpcd", "dhcpcd", "-B", "-q", g_net.ifname, (char *)NULL);
+        /* -B keeps dhcpcd in the foreground so init supervises the real PID.
+         *
+         * Wi-Fi must never get in the way of the wired link:
+         *   -m 1000            give Wi-Fi's routes a high metric, so if both
+         *                      interfaces end up on the same subnet the wired
+         *                      route stays preferred and replies still leave by
+         *                      the dock (a Wi-Fi route + an AP that isolates
+         *                      clients is enough to make the device unreachable
+         *                      even though it is perfectly online);
+         *   -Z en* / -Z eth*   dhcpcd may not touch a wired NIC at all — it is
+         *                      the developer's link to the device.
+         * Patterns are passed literally: execl does not glob. */
+        execl("/sbin/dhcpcd", "dhcpcd", "-B", "-q", "-m", "1000",
+              "-Z", "en*", "-Z", "eth*", g_net.ifname, (char *)NULL);
         _exit(127);
     }
 
