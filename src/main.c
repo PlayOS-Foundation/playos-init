@@ -400,6 +400,10 @@ int main(void)
     playos_boot_mark("/data mount done");
     playos_thermal_init(s);
 
+    /* Sprint 16 / T5: bring up Wi-Fi once /data exists — the profiles live
+     * there. No-op on a live/install/recovery boot or without a radio. */
+    playos_supervisor_start_network(s);
+
     /* S14-T6: late recovery detection is handled *non-blocking* in the
      * supervision loop below (see the recovery watch there). The old code
      * blocked here for 4s and printed a console prompt on every boot, which

@@ -60,6 +60,16 @@ void playos_supervisor_spawn_shell(struct playos_init_state *state);
 void playos_supervisor_shell_exited(struct playos_init_state *state,
                                      int exit_code, int signal);
 
+/* Start and supervise the network stack (Sprint 16, T5): wpa_supplicant,
+ * dhcpcd and the playos-net bridge. Call once /data is mounted (Wi-Fi profiles
+ * live there); it is a no-op on a live/install/recovery boot and on a system
+ * with no wireless interface. */
+void playos_supervisor_start_network(struct playos_init_state *state);
+
+/* Handle a network daemon exit. Restarts within the window/count policy. */
+void playos_supervisor_network_exited(struct playos_init_state *state, pid_t pid,
+                                      int exit_code, int signal);
+
 /* Generate a random launch token for a game launch (Sprint 7) */
 int playos_supervisor_generate_launch_token(struct playos_init_state *s);
 

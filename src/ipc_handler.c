@@ -218,6 +218,55 @@ send_simple_ack(int client_fd, const char *type)
 }
 
 /*
+ * Networking (Sprint 16, T5): network requests ride the one control plane.
+ * The shell asks init; init relays the message verbatim to the trusted
+ * playos-net bridge and passes the bridge's reply straight back. The shell
+ * never opens the bridge socket, and a game can reach neither one.
+ */
+#define PLAYOS_NET_BRIDGE_SOCK  "/run/playos/net/bridge.sock"
+
+static void relay_network_request(struct playos_init_state *s, int client_fd,
+                                  const struct playos_ipc_message *msg)
+{
+    static char buf[sizeof(struct playos_ipc_frame) + PLAYOS_IPC_MAX_BODY];
+
+    int fd = playos_ipc_client_connect(PLAYOS_NET_BRIDGE_SOCK);
+    if (fd < 0) {
+        /* wpa_supplicant/playos-net may still be starting — tell the caller
+         * rather than silently dropping the request. */
+        playos_log_write(s, "net", "bridge unreachable (%s): %s",
+                         PLAYOS_NET_BRIDGE_SOCK, strerror(errno));
+
+        struct playos_ipc_message err;
+        if (playos_ipc_message_from_type(PLAYOS_IPC_PROTOCOL_VERSION, "Error",
+                                         "\"error\":\"no_bridge\"", &err) == 0) {
+            playos_ipc_frame_write(client_fd, &err);
+            playos_ipc_message_free(&err);
+        }
+        return;
+    }
+
+    if (playos_ipc_frame_write(fd, msg) != 0) {
+        playos_log_write(s, "net", "relay write to bridge failed");
+        close(fd);
+        return;
+    }
+
+    int n = playos_ipc_frame_read(fd, (struct playos_ipc_frame *)buf,
+                                  sizeof(buf));
+    close(fd);
+
+    if (n <= 0) {
+        playos_log_write(s, "net", "no reply from the bridge");
+        return;
+    }
+
+    /* Pass the reply through untouched — init does not interpret it. */
+    if (write(client_fd, buf, (size_t)n) != n)
+        playos_log_write(s, "net", "relay reply write failed");
+}
+
+/*
  * Handle an incoming IPC message from a client.
  * Returns 0 to keep the connection open, -1 to close it.
  */
@@ -254,6 +303,16 @@ static int handle_message(struct playos_init_state *s, int client_fd,
     if (msg.type == NULL) {
         playos_ipc_message_free(&msg);
         return -1;
+    }
+
+    /* ── Networking (Sprint 16, T5) ──────────────────────────── */
+    if (strcmp(msg.type, PLAYOS_IPC_TYPE_SCAN_NETWORKS) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_CONNECT_NETWORK) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_DISCONNECT_NETWORK) == 0 ||
+        strcmp(msg.type, PLAYOS_IPC_TYPE_NETWORK_STATUS) == 0) {
+        relay_network_request(s, client_fd, &msg);
+        playos_ipc_message_free(&msg);
+        return 0;
     }
 
     /* ── QueryStatus ─────────────────────────────────────────── */

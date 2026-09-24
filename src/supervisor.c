@@ -17,6 +17,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 #include "playos-init/init.h"
 #include "playos-init/supervisor.h"
@@ -103,6 +104,262 @@ int playos_supervisor_init_signal_handler(void)
     return 0;
 }
 
+/* ── Network daemons (Sprint 16, T5) ─────────────────────────────────
+ * wpa_supplicant, dhcpcd and the playos-net bridge start once /data is mounted
+ * (Wi-Fi profiles live there) and are supervised like every other trusted
+ * daemon: a crash is logged and restarted within the same window/count policy
+ * the shell uses. The wireless interface is discovered, never assumed — the
+ * Ally's radio comes up as wlp6s0 (predictable naming), not wlan0. */
+
+#define PLAYOS_NET_WINDOW_S         60
+#define PLAYOS_NET_MAX_RESTARTS     5
+#define PLAYOS_NET_RESTART_DELAY_MS 1000
+#define PLAYOS_NET_CTRL_DIR         "/run/playos/net"
+
+struct playos_net_sup {
+    pid_t wpa_pid;
+    pid_t dhcpcd_pid;
+    pid_t net_pid;
+    struct playos_restart_info wpa_restarts;
+    struct playos_restart_info dhcpcd_restarts;
+    struct playos_restart_info net_restarts;
+    char  ifname[32];
+    int   started;
+};
+
+static struct playos_net_sup g_net;
+
+/* The radio is the interface that has a `wireless` attribute. */
+static int net_wireless_ifname(char *out, size_t out_sz)
+{
+    DIR *d = opendir("/sys/class/net");
+    if (!d)
+        return -1;
+
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.')
+            continue;
+
+        /* Interface names are IFNAMSIZ (16) at most, but d_name is not
+         * bounded by that — bound both buffers explicitly rather than
+         * relying on snprintf truncation. */
+        size_t nlen = strlen(e->d_name);
+        if (nlen == 0 || nlen >= 64)
+            continue;
+
+        char probe[128];
+        snprintf(probe, sizeof(probe), "/sys/class/net/%s/wireless", e->d_name);
+        if (access(probe, F_OK) == 0) {
+            if (nlen >= out_sz)
+                continue;
+            memcpy(out, e->d_name, nlen + 1);
+            closedir(d);
+            return 0;
+        }
+    }
+
+    closedir(d);
+    return -1;
+}
+
+/* wpa_supplicant needs its control directory to exist, group-owned and 0770, so
+ * that only root and playos-trusted reach the socket it creates inside. */
+static void net_prepare_runtime_dir(struct playos_init_state *s)
+{
+    mkdir("/run/playos", 0755);
+    if (mkdir(PLAYOS_NET_CTRL_DIR, 0770) != 0 && errno != EEXIST)
+        playos_log_write(s, "net", "mkdir %s failed: %s", PLAYOS_NET_CTRL_DIR,
+                         strerror(errno));
+
+    chown(PLAYOS_NET_CTRL_DIR, 0, 1000);   /* root:playos-trusted */
+    chmod(PLAYOS_NET_CTRL_DIR, 0770);
+}
+
+static void net_write_wpa_conf(struct playos_init_state *s)
+{
+    const char *path = PLAYOS_NET_CTRL_DIR "/wpa.conf";
+
+    FILE *f = fopen(path, "we");
+    if (!f) {
+        playos_log_write(s, "net", "cannot write %s: %s", path, strerror(errno));
+        return;
+    }
+
+    fprintf(f,
+            "ctrl_interface=" PLAYOS_NET_CTRL_DIR "\n"
+            "ctrl_interface_group=playos-trusted\n"
+            "ap_scan=1\n"
+            "update_config=1\n");
+    fclose(f);
+    chmod(path, 0600);
+}
+
+static void spawn_wpa_supplicant(struct playos_init_state *s)
+{
+    if (!g_net.ifname[0])
+        return;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        playos_log_write(s, "net", "wpa_supplicant fork failed: %s",
+                         strerror(errno));
+        return;
+    }
+
+    if (pid == 0) {
+        child_log_redirect("/data/log/wpa_supplicant-stderr.log");
+        execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+              "-i", g_net.ifname,
+              "-c", PLAYOS_NET_CTRL_DIR "/wpa.conf",
+              "-P", PLAYOS_NET_CTRL_DIR "/wpa.pid",
+              (char *)NULL);
+        _exit(127);
+    }
+
+    g_net.wpa_pid = pid;
+    playos_log_write(s, "net", "wpa_supplicant launched (PID %d, if=%s)",
+                     pid, g_net.ifname);
+}
+
+static void spawn_playos_net(struct playos_init_state *s)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        playos_log_write(s, "net", "playos-net fork failed: %s", strerror(errno));
+        return;
+    }
+
+    if (pid == 0) {
+        child_log_redirect("/data/log/playos-net-stderr.log");
+        execl("/usr/bin/playos-net", "playos-net", (char *)NULL);
+        _exit(127);
+    }
+
+    g_net.net_pid = pid;
+    playos_log_write(s, "net", "playos-net launched (PID %d)", pid);
+}
+
+/* dhcpcd gets the *wireless* interface only: the wired dock NIC is how a
+ * developer reaches the device and must not be touched. */
+static void spawn_dhcpcd(struct playos_init_state *s)
+{
+    if (!g_net.ifname[0])
+        return;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        playos_log_write(s, "net", "dhcpcd fork failed: %s", strerror(errno));
+        return;
+    }
+
+    if (pid == 0) {
+        child_log_redirect("/data/log/dhcpcd-stderr.log");
+        /* -B keeps dhcpcd in the foreground so init supervises the real PID. */
+        execl("/sbin/dhcpcd", "dhcpcd", "-B", "-q", g_net.ifname, (char *)NULL);
+        _exit(127);
+    }
+
+    g_net.dhcpcd_pid = pid;
+    playos_log_write(s, "net", "dhcpcd launched (PID %d, if=%s)",
+                     pid, g_net.ifname);
+}
+
+static int net_should_restart(struct playos_restart_info *r)
+{
+    time_t now = time(NULL);
+
+    if (now - r->window_start > PLAYOS_NET_WINDOW_S) {
+        r->count = 0;
+        r->window_start = now;
+    }
+
+    r->count++;
+    return (r->count <= PLAYOS_NET_MAX_RESTARTS);
+}
+
+void playos_supervisor_start_network(struct playos_init_state *s)
+{
+    if (g_net.started)
+        return;
+    g_net.started = 1;
+
+    /* A live/installer/recovery boot has no business associating. */
+    if (s->install_mode || s->recovery_mode) {
+        playos_log_write(s, "net", "network stack not started (install/recovery)");
+        return;
+    }
+
+    net_prepare_runtime_dir(s);
+
+    if (net_wireless_ifname(g_net.ifname, sizeof(g_net.ifname)) != 0) {
+        playos_log_write(s, "net",
+                         "no wireless interface found - network stack not started");
+        return;
+    }
+
+    net_write_wpa_conf(s);
+    spawn_wpa_supplicant(s);
+    spawn_dhcpcd(s);
+    spawn_playos_net(s);      /* retries the wpa control socket itself */
+    playos_log_write(s, "net", "network stack started (if=%s)", g_net.ifname);
+}
+
+void playos_supervisor_network_exited(struct playos_init_state *s, pid_t pid,
+                                      int exit_code, int signal_num)
+{
+    if (pid == 0)
+        return;
+
+    if (pid == g_net.wpa_pid) {
+        g_net.wpa_restarts.last_exit_code = exit_code;
+        g_net.wpa_restarts.last_signal = signal_num;
+        playos_log_write(s, "net", "wpa_supplicant exited: code=%d signal=%d",
+                         exit_code, signal_num);
+        g_net.wpa_pid = 0;
+
+        if (net_should_restart(&g_net.wpa_restarts)) {
+            usleep(PLAYOS_NET_RESTART_DELAY_MS * 1000);
+            spawn_wpa_supplicant(s);
+        } else {
+            playos_log_write(s, "net", "wpa_supplicant restart limit reached");
+        }
+        return;
+    }
+
+    if (pid == g_net.dhcpcd_pid) {
+        g_net.dhcpcd_restarts.last_exit_code = exit_code;
+        g_net.dhcpcd_restarts.last_signal = signal_num;
+        playos_log_write(s, "net", "dhcpcd exited: code=%d signal=%d",
+                         exit_code, signal_num);
+        g_net.dhcpcd_pid = 0;
+
+        if (net_should_restart(&g_net.dhcpcd_restarts)) {
+            usleep(PLAYOS_NET_RESTART_DELAY_MS * 1000);
+            spawn_dhcpcd(s);
+        } else {
+            playos_log_write(s, "net", "dhcpcd restart limit reached");
+        }
+        return;
+    }
+
+    if (pid == g_net.net_pid) {
+        g_net.net_restarts.last_exit_code = exit_code;
+        g_net.net_restarts.last_signal = signal_num;
+        playos_log_write(s, "net", "playos-net exited: code=%d signal=%d",
+                         exit_code, signal_num);
+        g_net.net_pid = 0;
+
+        if (net_should_restart(&g_net.net_restarts)) {
+            usleep(PLAYOS_NET_RESTART_DELAY_MS * 1000);
+            spawn_playos_net(s);
+        } else {
+            playos_log_write(s, "net", "playos-net restart limit reached");
+        }
+        return;
+    }
+}
+
 /* ── Zombie reaping ──────────────────────────────────────────────── */
 
 void playos_supervisor_reap_children(struct playos_init_state *s)
@@ -181,6 +438,19 @@ void playos_supervisor_reap_children(struct playos_init_state *s)
                 signal_num = WTERMSIG(wstatus);
 
             playos_supervisor_ssh_exited(s, exit_code, signal_num);
+        } else if ((g_net.wpa_pid != 0 && pid == g_net.wpa_pid) ||
+                   (g_net.dhcpcd_pid != 0 && pid == g_net.dhcpcd_pid) ||
+                   (g_net.net_pid != 0 && pid == g_net.net_pid)) {
+            /* Network daemons (Sprint 16, T5) */
+            int exit_code = -1;
+            int signal_num = 0;
+
+            if (WIFEXITED(wstatus))
+                exit_code = WEXITSTATUS(wstatus);
+            if (WIFSIGNALED(wstatus))
+                signal_num = WTERMSIG(wstatus);
+
+            playos_supervisor_network_exited(s, pid, exit_code, signal_num);
         } else {
             /* Unknown child — log and move on */
             playos_log_write(s, "sup", "reaped unknown child PID %d", pid);
