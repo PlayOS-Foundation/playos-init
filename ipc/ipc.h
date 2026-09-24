@@ -99,6 +99,23 @@ extern "C" {
 #define PLAYOS_IPC_TYPE_INSTALL_ERROR          "InstallError"
 #define PLAYOS_IPC_TYPE_UPDATE_ERROR       "UpdateError"
 
+/* ── Networking (Sprint 16) ──────────────────────────────────────────────
+ * The shell asks init, init relays to the trusted playos-net bridge, and the
+ * bridge answers on the same connection. Scanning/connecting is a system
+ * capability: games are not in playos-trusted and never reach these. */
+/* shell → init (relayed to playos-net) */
+#define PLAYOS_IPC_TYPE_SCAN_NETWORKS          "ScanNetworks"
+#define PLAYOS_IPC_TYPE_CONNECT_NETWORK        "ConnectNetwork"
+#define PLAYOS_IPC_TYPE_DISCONNECT_NETWORK     "DisconnectNetwork"
+#define PLAYOS_IPC_TYPE_NETWORK_STATUS         "NetworkStatus"
+/* playos-net → shell */
+#define PLAYOS_IPC_TYPE_SCAN_RESULTS           "ScanResults"
+#define PLAYOS_IPC_TYPE_CONNECT_NETWORK_ACK    "ConnectNetworkAck"
+#define PLAYOS_IPC_TYPE_CONNECT_NETWORK_ERROR  "ConnectNetworkError"
+#define PLAYOS_IPC_TYPE_NETWORK_STATUS_REPORT  "NetworkStatusReport"
+/* playos-net → shell (async) */
+#define PLAYOS_IPC_TYPE_NETWORK_STATE_CHANGED  "NetworkStateChanged"
+
 /* ── Lifecycle event constants ─────────────────────────────── */
 
 /* These byte values MUST match the PlayOSLifecycleEvent enum in
